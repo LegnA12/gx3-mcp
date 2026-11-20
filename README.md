@@ -40,17 +40,19 @@ El formato `.gx3` no está documentado. Se entendió analizando proyectos reales
 | `leer_plc` | Lee en vivo dispositivos del PLC por SLMP o Modbus/TCP (**solo lectura**). | "Lee X0 a X7, Y0 a Y4 y el valor actual de T0." |
 | `monitorear_ld` | Dibuja el ladder con el estado **en vivo** del PLC, como el monitor de GX Works3: `■` conduce o está activo, `□` no. Las comparaciones e instrucciones muestran sus valores. | "Monitorea el programa principal." |
 | `estado_plc` | Diagnóstico de la CPU: RUN/STOP, error y su hora, batería, caída de alimentación, tiempos de ciclo y reloj. | "¿Cómo está el PLC?" |
+| `diagnosticar_modbus_rtu` | Diagnóstico de los canales serie MODBUS RTU (`ADPRW`): modo, formato (bps/paridad), reintentos, timeouts y el último error traducido (por ejemplo `7309H` = el esclavo no responde, `730AH` con su excepción). | "¿Por qué no responde el sensor del CH1?" |
 
 Lo que `agregar_renglon_ld` sabe escribir:
 
-- Contactos: `X0` (NA), `/X0` (NC), `↑X0` (flanco de subida), `↓X0` (flanco de bajada) y comparaciones (`>= D10 K100`, con `=`, `<>`, `>`, `<`, `>=`, `<=`).
-- Salidas: `Y0` (bobina), `SET M0`, `RST M0`, `OUT T0 K30` (temporizador de 100 ms), `MOV K0 D10`, `INCP D10`.
-- Contactos en paralelo (rama OR) en la primera columna y varias columnas en serie (AND).
+- Contactos: `X0` (NA), `/X0` (NC), `↑X0` (flanco de subida), `↓X0` (flanco de bajada), comparaciones de 16 bits (`>= D10 K100`, con `=`, `<>`, `>`, `<`, `>=`, `<=`) y comparaciones REAL (`E< D10 E17.5`).
+- Salidas: `Y0` (bobina), `SET M0`, `RST M0`, `OUT T0 K30` (temporizador de 100 ms), `MOV K0 D10`, `INCP D10`, `EMOV E1.5 D20` (REAL), `ZRST M0 M15` (borrar un rango), `BMOV D0 D100 K8` (copiar un bloque).
+- Contactos en paralelo (rama OR) en **cualquier columna**, y varias columnas en serie (AND). Ejemplo: `(X0 OR X3) AND (X1 OR X2) AND /M0 → Y5`.
 
 ## Qué no puede hacer todavía
 
 - **No escribe etiquetas ni estructuras** (solo las lee). Los renglones nuevos usan dispositivos directos.
-- Las ramas **OR solo existen en la primera columna**; no hay ramas a mitad de renglón.
+- **Una sola salida por renglón**: todavía no escribe varias salidas en paralelo (aunque sí las lee).
+- **Sin comparaciones de 32 bits (`D>=`), `DMOV` ni `OUTH`**: no hay ejemplos reales para copiar su formato.
 - Contactos y bobinas solo con **dispositivos directos** (`X0`, `M10`, `D5`), no con etiquetas.
 - **Sin contadores.**
 - **Sin llamadas a FB desde ladder** al escribir (sí se leen).
@@ -388,8 +390,11 @@ Para el juego de instrucciones y la comunicación del FX5, consulta los manuales
 ## Hoja de ruta
 
 - [ ] Escribir etiquetas y estructuras (usando el experimento de diferencias).
-- [ ] Ramas OR a mitad de renglón.
-- [ ] Contadores.
+- [x] Ramas OR a mitad de renglón (idénticas byte a byte a un renglón real).
+- [x] `EMOV`, `ZRST`, `BMOV` y comparaciones REAL.
+- [x] Diagnóstico de canales MODBUS RTU.
+- [ ] Contadores, comparaciones de 32 bits, `DMOV` y `OUTH` (requieren un experimento de diferencias).
+- [ ] Varias salidas en paralelo en un mismo renglón.
 - [ ] Llamadas a FB desde ladder.
 - [ ] Validar el borrado de renglones en GX Works3.
 - [x] Lectura en vivo del PLC por SLMP (probada con un FX5U real).

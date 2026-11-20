@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import sqlite3
+import struct
 import tempfile
 import time
 import uuid
@@ -238,7 +239,12 @@ def _operando(n, etiquetas: dict) -> str:
         a = int(n["a"])
         return n["s"] + (format(a, "X") if n["s"] in ("X", "Y") else str(a))  # X/Y: digitos octales guardados como hex
     if t == "c":
-        return n["s"].split("_")[0] + str(n["v"])  # 'K_1' + v=30 -> K30
+        prefijo = n["s"].split("_")[0]
+        if prefijo == "E":  # REAL: v son los bits IEEE-754 en hex; t el texto tecleado
+            return "E" + (n.get("t") or format(struct.unpack(">f", bytes.fromhex(str(n["v"]).zfill(8)))[0], "g"))
+        if prefijo == "H":  # hexadecimal: v viene en decimal
+            return "H" + format(int(n["v"]), "X")
+        return prefijo + str(n["v"])  # 'K_1' + v=30 -> K30
     if t in ("l", "pl"):
         return etiquetas.get(n["id"], n["id"])
     if t == "I":
@@ -277,12 +283,14 @@ def _celda(e: dict, etiquetas: dict, valores: dict | None = None) -> str:
             v = val(args[0])
             conduce = None if v is None or flanco else (v == 1) == (nombre == "a")  # flanco: solo dura un scan
             return f"[{'/' if nombre == 'b' else ''}{flanco}{args[0]}]{_marca(conduce)}"
-        if valores is None:
-            return f"[{nombre} {' '.join(args)}]"  # contacto de comparacion: [> D0 K10]
+        etiqueta = ("E" if any(a.get("vt") == "Ar32" for a in op.get("as", [])) else "") + nombre  # REAL: LDE<
+        # shortcut: el monitor lee palabras de 16 bits; un REAL (2 palabras) se muestra sin valor hasta leerlo como REAL
+        if valores is None or etiqueta.startswith("E"):
+            return f"[{etiqueta} {' '.join(args)}]"  # contacto de comparacion: [> D0 K10]
         nums = [int(a[1:]) if re.fullmatch(r"K-?\d+", a) else val(a, True) for a in args]
         conduce = _COMPARAR[nombre](*nums) if None not in nums and nombre in _COMPARAR and len(nums) == 2 else None
         texto = " ".join(a if re.fullmatch(r"K-?\d+", a) or val(a, True) is None else f"{a}={val(a, True)}" for a in args)
-        return f"[{nombre} {texto}]{_marca(conduce)}"
+        return f"[{etiqueta} {texto}]{_marca(conduce)}"
     if nombre == "c":
         v = val(args[0])
         return f"({args[0]}){_marca(None if v is None else v == 1)}"
@@ -432,31 +440,48 @@ def leer_etiquetas(ruta_gx3: str) -> str:
 
 
 _PALABRAS = {"D", "R", "W", "SD"}  # dispositivos de palabra validos como operando
-_COMPARA = ("<>", ">=", "<=", "=", ">", "<")  # contactos de comparacion 16 bits con signo (LD=, LD>...)
-# instruccion -> (ct, tipos de operando); ancho en celdas = 1 + operandos. Formatos copiados de proyectos reales.
-_INSTRUCCIONES = {"MOV": ("a", ["A16", "A16"]), "INCP": ("p", ["A16s"])}
+_COMPARA = ("<>", ">=", "<=", "=", ">", "<")  # contactos de comparacion (LD=, LD>...); con prefijo E: REAL (LDE>=)
+# instruccion -> (ct, tipos 'as', clase de cada operando). Ancho en celdas = 1 + operandos. Formatos copiados de
+# proyectos reales: p = palabra o K, r = REAL (D/R o constante E), d = cualquier dispositivo (bit o palabra)
+_INSTRUCCIONES = {
+    "MOV": ("a", ["A16", "A16"], "pp"),
+    "INCP": ("p", ["A16s"], "p"),
+    "EMOV": ("a", ["Ar32", "Ar32"], "rr"),
+    "ZRST": ("a", ["Aea", "Aea"], "dd"),
+    "BMOV": ("a", ["A16", "A16", "A16"], "ppp"),  # BMOV origen destino cantidad
+}
+_EJEMPLOS = "'MOV K0 D10', 'INCP D10', 'EMOV E1.5 D20', 'ZRST M0 M15', 'BMOV D0 D100 K8'"
 
 
-def _palabra(texto: str) -> tuple[str, str]:
-    """Operando de palabra -> (cadena, nodo). K constante o dispositivo D/R/W/SD."""
+def _operando_w(texto: str, clase: str) -> tuple[list[str], str, bool]:
+    """Operando de instruccion o comparacion -> (cadenas, nodo, es_constante)."""
     t = texto.strip().upper()
-    if re.fullmatch(r"K\d+", t):
-        # shortcut: solo K positivas (0..32767); negativas/H/E sin ejemplo real verificado
+    if clase in "pr" and re.fullmatch(r"K\d+", t):
+        if clase == "r":
+            raise ToolError(f"{texto}: para un valor REAL usa una constante E, ej. E1.5")
+        # shortcut: solo K positivas (0..32767); negativas y H sin ejemplo real verificado
         if int(t[1:]) > 32767:
             raise ToolError(f"{texto}: la constante K debe estar entre 0 y 32767.")
-        return "K_1", f"c{{s=#:v={int(t[1:])}:si=s}}"
-    tipo, num = _dispositivo(t, _PALABRAS)
-    return tipo, f"d{{s=#:a={num}:vt=nn}}"
+        return ["K_1"], f"c{{s=#:v={int(t[1:])}:si=s}}", True
+    if clase == "r" and re.fullmatch(r"E-?\d+(\.\d+)?", t):
+        bits = struct.pack(">f", float(t[1:])).hex().upper()  # GX Works3 guarda los bits IEEE-754 en hexadecimal
+        return ["E_2n", t[1:]], f"c{{s=#:v={bits}:t=#}}", True
+    validos = _PALABRAS | _CONTACTOS if clase == "d" else {"D", "R"} if clase == "r" else _PALABRAS
+    tipo, num = _dispositivo(t, validos)
+    return [tipo], f"d{{s=#:a={num}:vt=nn}}", False
 
 
 def _contacto(texto: str) -> tuple[list[str], str, int]:
-    """'X0' NA, '/X0' NC, '↑X0' flanco subida, '↓X0' bajada, '>= D10 K100' comparacion -> (cadenas, s, celdas)."""
+    """'X0' NA, '/X0' NC, '↑X0' flanco subida, '↓X0' bajada, '>= D10 K100' comparacion,
+    'E>= D10 E17.5' comparacion REAL -> (cadenas, s, celdas)."""
     t = texto.strip()
     partes = t.split()
-    if len(partes) == 3 and partes[0] in _COMPARA:
-        (c1, n1), (c2, n2) = _palabra(partes[1]), _palabra(partes[2])
-        s = f"ce{{op=ct{{op=#:ct=a:as=[as{{vt=A16s}}:as{{vt=A16s}}]}}:args=[{n1}:{n2}]}}"
-        return [partes[0], c1, c2], s, 3
+    if len(partes) == 3 and partes[0].upper().lstrip("E") in _COMPARA:
+        real = partes[0].upper().startswith("E")
+        clase, vt = ("r", "Ar32") if real else ("p", "A16s")
+        (c1, n1, _), (c2, n2, _) = _operando_w(partes[1], clase), _operando_w(partes[2], clase)
+        s = f"ce{{op=ct{{op=#:ct=a:as=[as{{vt={vt}}}:as{{vt={vt}}}]}}:args=[{n1}:{n2}]}}"
+        return [partes[0].upper().lstrip("E")] + c1 + c2, s, 3
     flanco = {"↑": "p", "↓": "f"}.get(t[:1], "a")
     if flanco != "a":
         t = t[1:]
@@ -481,34 +506,38 @@ def _salida(texto: str) -> tuple[list[str], str, int]:
              f"args=[d{{s=#:a={num}:vt=nn}}:c{{s=#:v={k}:si=s}}]}}")
         return ["OUT__16", tipo, "K_1"], s, 3
     if partes and partes[0] in _INSTRUCCIONES:
-        ct, tipos = _INSTRUCCIONES[partes[0]]
+        ct, tipos, clases = _INSTRUCCIONES[partes[0]]
         if len(partes) - 1 != len(tipos):
-            raise ToolError(f"{partes[0]} lleva {len(tipos)} operando(s), ej. 'MOV K0 D10' o 'INCP D10'.")
-        ops = [_palabra(p) for p in partes[1:]]
-        if ops[-1][0] == "K_1":
+            raise ToolError(f"{partes[0]} lleva {len(tipos)} operando(s). Ejemplos: {_EJEMPLOS}.")
+        ops = [_operando_w(p, c) for p, c in zip(partes[1:], clases)]
+        destino = 1 if partes[0] == "BMOV" else -1
+        if ops[destino][2] or (partes[0] == "ZRST" and any(o[2] for o in ops)):
             raise ToolError(f"{texto}: el destino no puede ser una constante.")
+        if partes[0] == "ZRST" and ops[0][0][0] != ops[1][0][0]:
+            raise ToolError(f"{texto}: ZRST necesita los dos extremos del mismo tipo de dispositivo.")
         s = (f"ce{{op=cl{{op=#:ct={ct}:as=[{':'.join(f'as{{vt={v}}}' for v in tipos)}]}}:"
-             f"args=[{':'.join(n for _, n in ops)}]}}")
-        return [partes[0]] + [c for c, _ in ops], s, 1 + len(tipos)
+             f"args=[{':'.join(n for _, n, _ in ops)}]}}")
+        return [partes[0]] + [c for cad, _, _ in ops for c in cad], s, 1 + len(tipos)
     if len(partes) == 1:
         op, celdas = "c", 1  # bobina OUT
     elif len(partes) == 2 and partes[0] in ("SET", "RST"):
         op, celdas = partes[0], 2
     else:
-        raise ToolError("salida: 'Y0', 'SET M0', 'RST M0', 'OUT T0 K30', 'MOV K0 D10' o 'INCP D10'.")
+        raise ToolError(f"salida: 'Y0', 'SET M0', 'RST M0', 'OUT T0 K30', {_EJEMPLOS}.")
     tipo, num = _dispositivo(partes[-1], _BOBINAS)
     s = f"ce{{op=cl{{op=#:ct=a:as=[as{{vt=Abl}}]}}:args=[d{{s=#:a={num}:vt=nn}}]}}"
     return [op, tipo], s, celdas
 
 
 def _renglon(columnas: list[list[str]], salida: str) -> tuple[str, int]:
-    """Devuelve (data, filas). columnas en serie (AND); cada una con contactos en paralelo (OR)."""
+    """Devuelve (data, filas). columnas en serie (AND); cada una con contactos en paralelo (OR), en cualquier columna.
+
+    Una rama OR que empieza en la columna x y mide w celdas lleva lineas verticales en x (abre, si x > 0)
+    y en x + w (cierra), como en los renglones reales: |-[Y1]-+-[/M505]-+-(Y2)  ->  v{pos=1,1}, v{pos=2,1}.
+    """
     if not columnas or any(not col for col in columnas):
         raise ToolError("columnas necesita al menos una columna y ninguna vacia, ej. [['X0','Y0'],['X1']]")
-    # shortcut: OR solo en la primera columna (unico caso verificado en proyectos reales); ampliar si se necesita OR a media linea
-    if any(len(col) > 1 for col in columnas[1:]):
-        raise ToolError("Por ahora los contactos en paralelo (OR) solo se permiten en la primera columna.")
-    cadenas, elementos, x = [], [], 0
+    cadenas, elementos, verticales, x = [], [], set(), 0
     for col in columnas:
         hechos = [_contacto(t) for t in col]
         ancho_col = max(h[2] for h in hechos)
@@ -517,14 +546,17 @@ def _renglon(columnas: list[list[str]], salida: str) -> tuple[str, int]:
             elementos.append(f"e{{s={s}:pos={x},{y}}}")
             # rama mas corta que la columna: lineas horizontales explicitas hasta la union
             elementos += [f"e{{s=-:pos={x + k},{y}}}" for k in range(celdas, ancho_col)]
+        for y in range(1, len(col)):
+            if x > 0:
+                verticales.add((x, y))
+            verticales.add((x + ancho_col, y))
         x += ancho_col
     cad, s, celdas = _salida(salida)
     cadenas += cad
     elementos.append(f"e{{s={s}:pos={x},0}}")
-    filas = len(columnas[0])
-    union = max(_contacto(t)[2] for t in columnas[0])  # columna donde se cierra el OR
-    verticales = (":vs=[" + ":".join(f"v{{pos={union},{y}}}" for y in range(1, filas)) + "]") if filas > 1 else ""
-    arbol = f"cb{{fg=fg{{dim={x + celdas}x{filas}:es=[{':'.join(elementos)}]{verticales}}}}}"
+    filas = max(len(col) for col in columnas)
+    vs = (":vs=[" + ":".join(f"v{{pos={c},{y}}}" for c, y in sorted(verticales)) + "]") if verticales else ""
+    arbol = f"cb{{fg=fg{{dim={x + celdas}x{filas}:es=[{':'.join(elementos)}]{vs}}}}}"
     return _bloque(cadenas, arbol), filas
 
 
@@ -911,6 +943,75 @@ def estado_plc(ip: str, puerto: int, protocolo: str = "slmp") -> str:
     if sm53:
         lineas.append("Hubo caida de alimentacion AC/DC (SM53)")
     return "\n".join(lineas)
+
+
+# Modbus RTU por canal (FX5 User's Manual (Communication) p557-564, p863-865; numeros confirmados con los
+# comentarios de sistema de GX Works3). Canal n usa la base + 10*(n-1).
+_MODOS = {0: "MELSOFT/MC", 3: "N:N", 5: "sin protocolo", 6: "enlace paralelo", 7: "inversor", 9: "MODBUS RTU",
+          12: "protocolo predefinido"}
+_ERRORES_RTU = {
+    0x7001: "el canal lo usa una comunicacion distinta de MODBUS RTU", 0x7010: "error de paridad, overrun o framing",
+    0x7304: "error de CRC", 0x7305: "overrun: se recibieron 256 bytes o mas", 0x7306: "longitud recibida incorrecta",
+    0x7307: "codigo de funcion no soportado", 0x7308: "direccion de dispositivo invalida",
+    0x7309: "TIMEOUT: el esclavo no respondio a tiempo (cableado, n.o de esclavo, velocidad/paridad o esclavo apagado)",
+    0x730A: "respuesta de excepcion del esclavo", 0x730B: "respondio otro n.o de esclavo",
+    0x730C: "la respuesta trae otro codigo de funcion", 0x730D: "lectura enviada como broadcast",
+    0x730E: "valor fuera de rango en la peticion", 0x7311: "puerto duplicado con otra funcion"}
+_EXCEPCIONES = {1: "funcion ilegal", 2: "direccion no asignada en el esclavo", 3: "dato ilegal en la peticion"}
+_BAUDIOS = {3: 300, 4: 600, 5: 1200, 6: 2400, 7: 4800, 8: 9600, 9: 19200, 10: 38400, 11: 57600, 13: 115200}
+
+
+def _formato_serie(v: int) -> str:
+    """SD8502: b1-b2 paridad (00 ninguna, 01 impar, 11 par), b3 parada, b4-b7 baudios (p562)."""
+    paridad = {0: "sin paridad", 1: "impar", 3: "par"}.get((v >> 1) & 3, "?")
+    return f"{_BAUDIOS.get((v >> 4) & 0xF, '?')} bps, 8 bits, {paridad}, {2 if v >> 3 & 1 else 1} bit de parada"
+
+
+@mcp.tool()
+def diagnosticar_modbus_rtu(ip: str, puerto: int, canal: int = 0, protocolo: str = "slmp") -> str:
+    """Diagnostico de los canales serie MODBUS RTU (ADPRW) del FX5, SOLO LECTURA: modo del canal, formato
+    (bps/paridad), comunicacion en curso, reintentos, timeouts y el ultimo error traducido.
+
+    canal: 1-4 (CH1 RS-485 integrado, CH2 placa, CH3/CH4 adaptadores); 0 = los cuatro.
+    """
+    canales = [canal] if canal else [1, 2, 3, 4]
+    if not all(1 <= c <= 4 for c in canales):
+        raise ToolError("canal debe ser 1, 2, 3, 4 o 0 (todos).")
+    pedidos = []
+    for c in canales:
+        o = 10 * (c - 1)
+        pedidos += [f"SM{8800 + o}:3", f"SM{8500 + o}", f"SD{8500 + o}:4", f"SD{8800 + o}", f"SD{8861 + o}:5"]
+    lecturas = _leer_dispositivos(ip, puerto, pedidos, protocolo)
+    salida = []
+    for i, c in enumerate(canales):
+        (comunicando, reintento, timeout), (err_serie,), (codigo, detalle, formato, modo), (reint_act,), conf = \
+            lecturas[5 * i:5 * i + 5]
+        codigo, detalle = codigo & 0xFFFF, detalle & 0xFFFF
+        if modo == -1:  # FFFFH: visto en vivo en canales sin placa/adaptador instalado
+            salida.append(f"CH{c}: sin placa o adaptador instalado (SD{8503 + 10 * (c - 1)}=FFFFH)")
+            continue
+        lineas = [f"CH{c}: modo {_MODOS.get(modo, f'desconocido ({modo})')} (SD{8503 + 10 * (c - 1)}={modo})"]
+        if modo != 9:
+            salida += lineas + ["    no esta configurado como MODBUS RTU (ADPRW no hace nada en este canal)"]
+            continue
+        estacion, t_resp, _, t_msg, reintentos = conf
+        lineas.append(f"    formato: {_formato_serie(formato)}; estacion propia {estacion} ({'maestro' if estacion == 0 else 'esclavo'})")
+        lineas.append(f"    timeout de respuesta {t_resp} ms, retardo entre mensajes {t_msg} ms, reintentos {reintentos}")
+        lineas.append(f"    ahora: {'comunicando' if comunicando else 'en reposo'}"
+                      + (", REINTENTANDO" if reintento else "") + (", TIMEOUT" if timeout else "")
+                      + f"; reintentos en curso {reint_act}")
+        if codigo or err_serie:
+            texto = _ERRORES_RTU.get(codigo, "codigo no documentado")
+            if codigo == 0x730A:
+                texto += f": FC {detalle >> 8:02X}H, excepcion {detalle & 0xFF:02X}H ({_EXCEPCIONES.get(detalle & 0xFF, '?')})"
+            elif codigo in (0x730B, 0x730C):
+                texto += f" (pedido {detalle >> 8:02X}H, recibido {detalle & 0xFF:02X}H)"
+            lineas.append(f"    ULTIMO ERROR {codigo:04X}H: {texto}"
+                          + (" [queda registrado hasta OFF->ON, reset, STOP->RUN o SM50]" if err_serie else ""))
+        else:
+            lineas.append("    sin error registrado")
+        salida += lineas
+    return "\n".join(salida)
 
 
 if __name__ == "__main__":

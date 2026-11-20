@@ -38,7 +38,8 @@ assert data.endswith(arbol_real) and filas == 2, (data, real)
 print("OR igual al real")
 
 # 4) Errores claros
-for cols, sal in [([["X8"]], "Y0"), ([["X0"], ["X1", "X2"]], "Y0"), ([["D0"]], "Y0"), ([["X0"]], "MOV D0"), ([["X0"]], "OUT M0 K10"), ([["X0"]], "OUT T0 K0")]:
+for cols, sal in [([["X8"]], "Y0"), ([["X0"]], "ZRST M0 D5"), ([["D0"]], "Y0"), ([["X0"]], "MOV D0"), ([["X0"]], "OUT M0 K10"),
+                  ([["X0"]], "OUT T0 K0"), ([["X0"]], "EMOV K5 D20"), ([["X0"]], "BMOV D0 K5 K8"), ([["E< D10 K5"]], "Y0")]:
     try:
         g._renglon(cols, sal)
         raise AssertionError(f"debio fallar {cols} {sal}")
@@ -158,4 +159,38 @@ try:
 finally:
     g.plc_slmp.leer = original
 print("estado/monitor ok")
+
+# 14) Formatos nuevos contra renglones reales
+# OR a mitad de renglon: identico al real |-[Y1]-+-[/M505]-+-(Y2)  (verticales que abren y cierran)
+assert g._renglon([["Y1"], ["/M505", "SM413"]], "Y2")[0] in reales, g._renglon([["Y1"], ["/M505", "SM413"]], "Y2")[0]
+assert existe(g._salida("EMOV E1.5 D20")[1].split(":args=")[0])                # EMOV (REAL)
+assert existe(g._salida("ZRST M0 M15")[1].split(":args=")[0])                  # ZRST
+assert existe(g._salida("BMOV D0 D100 K8")[1].split(":args=")[0])              # BMOV origen destino cantidad
+cad, s, _ = g._contacto("E< D10 E17.0")
+assert cad == ["<", "D", "E_2n", "17.0"] and "c{s=#:v=41880000:t=#}" in s      # constante REAL como en el real
+assert existe(s.split(":args=")[0]) and any("c{s=#:v=41880000:t=#}" in r for r in reales)
+assert g._salida("ZRST M0 M15")[0] == ["ZRST", "M", "M"] and g._salida("BMOV D0 D100 K8")[0] == ["BMOV", "D", "D", "K_1"]
+# lectura de vuelta: lo escrito se lee igual
+for cols, sal, esperado in [([["E< D10 E17.0"]], "SET M1", "[E< D10 E17.0]"), ([["X0"]], "EMOV E1.5 D20", "[EMOV E1.5 D20]"),
+                            ([["X0"]], "ZRST M0 M15", "[ZRST M0 M15]"), ([["X0"]], "BMOV D0 D100 K8", "[BMOV D0 D100 K8]")]:
+    assert esperado in g._leer_bloque(g._renglon(cols, sal)[0], {})[0], (esperado, g._leer_bloque(g._renglon(cols, sal)[0], {}))
+assert g._operando({"_": "c", "s": "H_1", "v": "12290"}, {}) == "H3002"
+print("instrucciones nuevas y OR a media linea ok")
+
+# 15) Diagnostico Modbus RTU con un PLC simulado
+original = g.plc_slmp.leer
+try:
+    # CH1: MODBUS RTU maestro, 19200 bps par 1 parada (0b1001_0110), con timeout 7309H registrado
+    g.plc_slmp.leer = lambda ip, puerto, ds, timeout=3.0: [[0, 1, 1], [1], [0x7309, 0, 0x96, 9], [2], [0, 500, 0, 5, 3]]
+    diag = g.diagnosticar_modbus_rtu("127.0.0.1", 5000, 1)
+    for esperado in ("modo MODBUS RTU", "19200 bps", "par", "maestro", "REINTENTANDO", "7309H", "TIMEOUT", "reintentos 3"):
+        assert esperado in diag, (esperado, diag)
+    # excepcion 730AH: FC 03H, codigo 02H
+    g.plc_slmp.leer = lambda ip, puerto, ds, timeout=3.0: [[0, 0, 0], [1], [0x730A, 0x0302, 0x96, 9], [0], [0, 500, 0, 5, 3]]
+    assert "FC 03H, excepcion 02H (direccion no asignada en el esclavo)" in g.diagnosticar_modbus_rtu("127.0.0.1", 5000, 1)
+    g.plc_slmp.leer = lambda ip, puerto, ds, timeout=3.0: [[0, 0, 0], [0], [0, 0, 0, -1], [0], [0, 0, 0, 0, 0]]
+    assert "sin placa" in g.diagnosticar_modbus_rtu("127.0.0.1", 5000, 2)
+finally:
+    g.plc_slmp.leer = original
+print("diagnostico Modbus RTU ok")
 print("TODO OK")
