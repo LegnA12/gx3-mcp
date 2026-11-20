@@ -121,4 +121,41 @@ if len(sys.argv) > 3:
     clave = [[int(t) if t.isdigit() else t for t in re.split(r"(\d+)", d)] for d in devs]
     assert clave == sorted(clave), "dispositivos sin orden natural"
     print("etiquetas ok:", len(et.splitlines()), "lineas")
+
+# 11) Monitor: marcas de estado con valores conocidos (sin PLC)
+def una_fila(cols, sal, valores):
+    return re.sub("-+", "-", g._leer_bloque(g._renglon(cols, sal)[0], {}, None, valores)[0])
+assert una_fila([["X0"], ["/X1"]], "Y0", {("X0", False): 1, ("X1", False): 1, ("Y0", False): 0}) == "|-[X0]■-[/X1]□-(Y0)□-"
+assert "[>= D10=7 K5]■" in una_fila([[">= D10 K5"]], "Y4", {("D10", True): 7, ("Y4", False): 1})
+assert "[>= D10=3 K5]□" in una_fila([[">= D10 K5"]], "Y4", {("D10", True): 3})
+assert "[OUT T0 K30]{T0=12}" in una_fila([["X0"]], "OUT T0 K30", {("T0", True): 12})
+assert g._clave_plc("T0", False, {}) == "TS0" and g._clave_plc("T0", True, {}) == "TN0"
+assert g._clave_plc("Motor.Marcha", False, {"Motor.Marcha": "M5"}) == "M5" and g._clave_plc("DEC1", True, {}) is None
+
+# 12) Referencia cruzada y revision con reglas nuevas, sobre una copia
+c3 = os.path.join(d, "c3.gx3")
+shutil.copy(sys.argv[2], c3)
+prog = g.listar_programas(c3).split()[0]
+rc = g.referencia_cruzada(c3, "X1")
+assert rc.startswith("X1\n") and "contacto" in rc, rc
+for cols, sal in ([["X10"]], "SET M5"), ([["T9"]], "Y6"), ([["Y7"]], "M7"):
+    g.agregar_renglon_ld(c3, prog, cols, sal, "prueba de revision", c3)
+rev = g.revisar_ld(c3)
+for esperado in ("SET SIN RST M5", "TIMER SIN ARRANCAR T9", "SALIDA SIN ESCRIBIR Y7"):
+    assert esperado in rev, (esperado, rev)
+print("referencia/revision ok")
+
+# 13) estado_plc y monitorear_ld con un PLC simulado (se reemplaza el cliente SLMP)
+original = g.plc_slmp.leer
+try:
+    g.plc_slmp.leer = lambda ip, puerto, ds, timeout=3.0: [
+        [0], [1, 0], [0x2220, 2026, 11, 20, 9, 30, 5, 4], [0, 1, 0], [2026, 11, 20, 9, 31, 0, 4], [1, 279, 0, 175, 2, 475]]
+    est = g.estado_plc("127.0.0.1", 5000)
+    assert "CPU: RUN" in est and "2220H" in est and "BAJA ahora" in est and "actual 1.279 ms" in est, est
+    g.plc_slmp.leer = lambda ip, puerto, ds, timeout=3.0: [[1] for _ in ds]
+    mon = g.monitorear_ld(c3, prog, "127.0.0.1", 5000)
+    assert mon.startswith("Monitor") and "■" in mon, mon[:200]
+finally:
+    g.plc_slmp.leer = original
+print("estado/monitor ok")
 print("TODO OK")

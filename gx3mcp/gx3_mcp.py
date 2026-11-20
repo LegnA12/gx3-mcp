@@ -253,7 +253,16 @@ def _operando(n, etiquetas: dict) -> str:
 _FLANCO = {"a": "", "p": "↑", "f": "↓"}  # ct=a normal, p subida, f bajada (segun manual cap. 5)
 
 
-def _celda(e: dict, etiquetas: dict) -> str:
+_COMPARAR = {"=": lambda a, b: a == b, "<>": lambda a, b: a != b, ">": lambda a, b: a > b,
+             "<": lambda a, b: a < b, ">=": lambda a, b: a >= b, "<=": lambda a, b: a <= b}
+
+
+def _marca(conduce) -> str:
+    return "" if conduce is None else ("■" if conduce else "□")
+
+
+def _celda(e: dict, etiquetas: dict, valores: dict | None = None) -> str:
+    """valores (opcional, monitor en vivo): (operando, es_palabra) -> valor leido del PLC."""
     s = e["s"]
     if s == "-":  # linea horizontal explicita (ramas que llegan mas lejos que sus contactos)
         return "-"
@@ -262,26 +271,37 @@ def _celda(e: dict, etiquetas: dict) -> str:
     op = s["op"]
     args = [_operando(a, etiquetas) for a in s.get("args", [])]
     nombre, flanco = op["op"], _FLANCO.get(op.get("ct", "a"), "?")
+    val = (lambda a, palabra=False: valores.get((a, palabra))) if valores is not None else (lambda a, palabra=False: None)
     if op["_"] == "ct":
         if nombre in ("a", "b"):
-            return f"[{'/' if nombre == 'b' else ''}{flanco}{args[0]}]"
-        return f"[{nombre} {' '.join(args)}]"  # contacto de comparacion: [> D0 K10]
+            v = val(args[0])
+            conduce = None if v is None or flanco else (v == 1) == (nombre == "a")  # flanco: solo dura un scan
+            return f"[{'/' if nombre == 'b' else ''}{flanco}{args[0]}]{_marca(conduce)}"
+        if valores is None:
+            return f"[{nombre} {' '.join(args)}]"  # contacto de comparacion: [> D0 K10]
+        nums = [int(a[1:]) if re.fullmatch(r"K-?\d+", a) else val(a, True) for a in args]
+        conduce = _COMPARAR[nombre](*nums) if None not in nums and nombre in _COMPARAR and len(nums) == 2 else None
+        texto = " ".join(a if re.fullmatch(r"K-?\d+", a) or val(a, True) is None else f"{a}={val(a, True)}" for a in args)
+        return f"[{nombre} {texto}]{_marca(conduce)}"
     if nombre == "c":
-        return f"({args[0]})"
+        v = val(args[0])
+        return f"({args[0]}){_marca(None if v is None else v == 1)}"
     nombre = nombre.replace("OUT__16", "OUT")
     if flanco == "↑" and not nombre.endswith("P"):  # INCP ya trae la P en el nombre
         nombre += "P"
-    return f"[{nombre} {' '.join(args)}]"
+    vistos = [f"{a}={val(a, nombre not in ('SET', 'RST') or _es_palabra(a))}" for a in args
+              if val(a, nombre not in ("SET", "RST") or _es_palabra(a)) is not None]
+    return f"[{nombre} {' '.join(args)}]" + (f"{{{', '.join(vistos)}}}" if vistos else "")
 
 
-def _dibujar(fg: dict, etiquetas: dict) -> list[str]:
+def _dibujar(fg: dict, etiquetas: dict, valores: dict | None = None) -> list[str]:
     """Dibuja una rejilla fg{dim, es, vs} como lineas de texto. Las lineas horizontales son implicitas."""
     cols, filas = (int(x) for x in fg["dim"].split("x")) if "x" in fg.get("dim", "") else (1, 1)
     cols, filas = max(cols, 1), max(filas, 1)
     celdas = {}
     for e in fg.get("es", []):
         c, r = (int(x) for x in e["pos"].split(","))
-        celdas[(c, r)] = _celda(e, etiquetas)
+        celdas[(c, r)] = _celda(e, etiquetas, valores)
     vert = {tuple(int(x) for x in v["pos"].split(",")) for v in fg.get("vs", [])}
     ancho = max([len(t) for t in celdas.values()] + [6]) + 2
     lineas = []
@@ -300,8 +320,9 @@ def _dibujar(fg: dict, etiquetas: dict) -> list[str]:
     return lineas
 
 
-def _leer_bloque(data: str, etiquetas: dict, clases: dict | None = None) -> list[str]:
-    """etiquetas: _lid -> nombre; clases: _lid -> clase (VAR_INPUT, VAR_OUTPUT...) para la direccion de pines de FB."""
+def _leer_bloque(data: str, etiquetas: dict, clases: dict | None = None, valores: dict | None = None) -> list[str]:
+    """etiquetas: _lid -> nombre; clases: _lid -> clase (VAR_INPUT, VAR_OUTPUT...) para la direccion de pines de FB.
+    valores: lecturas en vivo para el monitor (ver monitorear_ld)."""
     cadenas, texto = _separar(data)
     arbol = _arbol(texto, cadenas)
     t = arbol.get("_")
@@ -310,7 +331,7 @@ def _leer_bloque(data: str, etiquetas: dict, clases: dict | None = None) -> list
     if t == "end":
         return ["[END]"]
     if t == "cb":
-        return _dibujar(arbol["fg"], etiquetas)
+        return _dibujar(arbol["fg"], etiquetas, valores)
     if t == "fbcs":
         # llamada a FB: cbag = pin de bit alimentado por un circuito; vag = pin de valor con su argumento
         fb = arbol["fb"]
@@ -319,9 +340,11 @@ def _leer_bloque(data: str, etiquetas: dict, clases: dict | None = None) -> list
             nombre = _operando(pin["l"], etiquetas)
             flecha = "=>" if (clases or {}).get(pin["l"].get("id"), "").startswith("VAR_OUTPUT") else ":="
             if pin["_"] == "vag":
-                lineas.append(f"    {nombre} {flecha} {_operando(pin['v'], etiquetas)}")
+                arg = _operando(pin["v"], etiquetas)
+                v = (valores or {}).get((arg, True))
+                lineas.append(f"    {nombre} {flecha} {arg}" + ("" if v is None else f" = {v}"))
             else:
-                circuito = _dibujar(pin["fg"], etiquetas)
+                circuito = _dibujar(pin["fg"], etiquetas, valores)
                 lineas.append(f"    {nombre} {flecha} " + circuito[0].lstrip("|"))
                 lineas += ["    " + " " * (len(nombre) + 4) + l.lstrip("|") for l in circuito[1:]]
         return lineas
@@ -581,39 +604,220 @@ def borrar_renglon_ld(ruta_gx3: str, programa: str, renglon: int, ruta_salida: s
     return _guardar_cambio(ruta_gx3, programa, "_LDDB.db", cambiar, ruta_salida, extra="_MilDB.db")
 
 
-@mcp.tool()
-def revisar_ld(ruta_gx3: str, programa: str) -> str:
-    """Revisa el ladder: dobles bobinas (misma salida OUT en varios renglones) y salidas usadas con OUT y SET/RST a la vez."""
+# ---------------- Analisis: recorrido comun de usos (referencia cruzada, revision, monitor) ----------------
+_PAL = {"D", "R", "SD", "TN", "CN"}
+# shortcut: sin B/W (numeracion hex): se omiten en el monitor y en el ST hasta verificar su formato en ladder
+_DISP = re.compile(r"(SM|SD|TS|TN|CS|CN|X|Y|M|L|F|D|R|T|C)(\d+)")
+_CONSTANTE = re.compile(r"[KHE]-?[\d.]+")
+# instruccion -> indices de operandos que ESCRIBE (el resto se leen). shortcut: lista corta; el resto se marca "operando"
+_DESTINOS = {"MOV": [-1], "MOVP": [-1], "DMOV": [-1], "DMOVP": [-1], "EMOV": [-1], "EMOVP": [-1],
+             "BMOV": [1], "BMOVP": [1], "FMOV": [1], "FMOVP": [1], "ZRST": [0, 1], "ZRSTP": [0, 1],
+             "INC": [0], "INCP": [0], "DEC": [0], "DECP": [0], "DINC": [0], "DINCP": [0]}
+_ESCRIBE = {"bobina", "SET", "RST", "OUT timer", "destino", "escritura ST"}
+
+
+def _es_palabra(texto: str) -> bool:
+    m = _DISP.fullmatch(texto)
+    return bool(m) and m.group(1) in _PAL
+
+
+def _clave_plc(texto: str, palabra: bool, alias: dict) -> str | None:
+    """Operando -> dispositivo legible por SLMP/Modbus. T/C: contacto (TS/CS) o valor actual (TN/CN)."""
+    m = _DISP.fullmatch(alias.get(texto, texto))
+    if not m:
+        return None
+    tipo, num = m.groups()
+    if tipo in ("T", "C"):
+        tipo = tipo + ("N" if palabra else "S")
+    return f"{tipo}{num}"
+
+
+def _usos_elemento(s: dict, etiquetas: dict):
+    """(operando, rol) de un elemento ladder ce{...}. Omite constantes."""
+    op = s["op"]
+    nombre = op["op"]
+    args = [_operando(a, etiquetas) for a in s.get("args", [])]
+    if op["_"] == "ct":
+        rol = {"a": "contacto NA", "b": "contacto NC"}.get(nombre, "comparacion")
+        if nombre in ("a", "b") and op.get("ct") in ("p", "f"):
+            rol = "flanco " + ("subida" if op["ct"] == "p" else "bajada")
+        roles = [rol] * len(args)
+    elif nombre == "c":
+        roles = ["bobina"]
+    elif nombre in ("SET", "RST"):
+        roles = [nombre]
+    elif nombre == "OUT__16":
+        roles = ["OUT timer", "lectura"]
+    else:
+        destinos = {i % len(args) for i in _DESTINOS.get(nombre, [])} if args else set()
+        roles = ["destino" if i in destinos else ("fuente" if nombre in _DESTINOS else "operando")
+                 for i in range(len(args))]
+    for a, rol in zip(args, roles):
+        if not _CONSTANTE.fullmatch(a):
+            yield a, rol
+
+
+def _usos_bloque(arbol: dict, etiquetas: dict):
+    if arbol.get("_") == "cb":
+        circuitos = [arbol["fg"]]
+    elif arbol.get("_") == "fbcs":
+        circuitos = [p["fg"] for p in arbol.get("ig", []) if p["_"] == "cbag"]
+        for p in arbol.get("ig", []):
+            if p["_"] == "vag":
+                yield _operando(p["v"], etiquetas), "argumento FB"
+    else:
+        return
+    for fg in circuitos:
+        for e in fg.get("es", []):
+            if isinstance(e["s"], dict) and e["s"].get("_") == "ce":
+                yield from _usos_elemento(e["s"], etiquetas)
+
+
+def _usos(ruta_gx3: str, programa: str = "") -> tuple[list[tuple], dict, dict, int]:
+    """Todos los usos del proyecto: [(operando, programa, lugar, rol)], info de etiquetas, ST por programa, renglones."""
+    info = nombres_etiquetas(ruta_gx3)
+    nombres = {k: v["nombre"] or k for k, v in info.items()}
+    usos, st, n_renglones = [], {}, 0
     with _abrir(ruta_gx3) as z, tempfile.TemporaryDirectory() as d:
-        nombre = f"{programa}_LDDB.db"
-        if nombre not in z.namelist():
-            raise ToolError(f"No hay programa LD '{programa}'. Usa listar_programas.")
-        c = sqlite3.connect(z.extract(nombre, d))
-        try:
-            filas = c.execute("select blocktype, data from LadderBlocks where blocktype in (0, 4) order by pos").fetchall()
-        finally:
-            c.close()
-    out, setrst = {}, {}
-    for n, (tipo, data) in enumerate(filas, 1):
-        if tipo != 0:
-            continue
-        cad, texto = _separar(data)
-        arbol = _arbol(texto, cad)
-        for e in arbol.get("fg", {}).get("es", []) if arbol.get("_") == "cb" else []:
-            s = e["s"]
-            if not isinstance(s, dict) or s["op"]["_"] != "cl" or not s.get("args"):
+        for n in z.namelist():
+            m = re.fullmatch(r"([0-9a-f]{16})_(LDDB|STDB)\.db", n)
+            if not m or (programa and m.group(1) != programa):
                 continue
-            destino = _operando(s["args"][0], {})
-            op = s["op"]["op"]
-            if op in ("c", "OUT__16"):
-                out.setdefault(destino, []).append(n)
-            elif op in ("SET", "RST"):
-                setrst.setdefault(destino, []).append(n)
-    avisos = [f"DOBLE BOBINA {k}: OUT en R{', R'.join(map(str, v))} (solo cuenta el ultimo)"
-              for k, v in out.items() if len(v) > 1]
-    avisos += [f"MEZCLA {k}: OUT en R{', R'.join(map(str, out[k]))} y SET/RST en R{', R'.join(map(str, v))}"
-               for k, v in setrst.items() if k in out]
-    return "\n".join(avisos) or f"Sin problemas en {len(filas)} renglones (dobles bobinas y OUT+SET/RST)."
+            c = sqlite3.connect(z.extract(n, d))
+            try:
+                if m.group(2) == "LDDB":
+                    filas = c.execute("select data from LadderBlocks where blocktype in (0, 4) order by pos").fetchall()
+                else:
+                    st[m.group(1)] = "\n".join(t for (t,) in c.execute("select data from StBlocks order by pos"))
+                    continue
+            finally:
+                c.close()
+            for i, (data,) in enumerate(filas, 1):
+                n_renglones += 1
+                try:
+                    cad, texto = _separar(data)
+                    usos += [(a, m.group(1), f"R{i}", rol) for a, rol in _usos_bloque(_arbol(texto, cad), nombres)]
+                except Exception:  # un bloque raro no debe tapar el resto
+                    continue
+    # ST: dispositivos y etiquetas por linea; antes de ':=' es escritura
+    etiq = {v["nombre"] for v in info.values() if v["nombre"] and v["clase"] != "MIEMBRO"}
+    for prog, texto in st.items():
+        for num, linea in enumerate(texto.replace("\r\n", "\n").split("\n"), 1):
+            codigo = re.sub(r"//.*|\(\*.*?\*\)", "", linea)
+            izq = codigo.split(":=")[0] if ":=" in codigo else ""
+            for t in re.findall(r"[A-Za-z_][\w.]*(?:\[[^\]]*\])?", codigo):
+                base = t.split("[")[0]
+                if _DISP.fullmatch(base) or base.split(".")[0] in etiq:
+                    rol = "escritura ST" if izq and re.search(rf"(?<![\w.]){re.escape(t)}(?![\w.])", izq) else "lectura ST"
+                    usos.append((t, prog, f"L{num}", rol))
+    return usos, info, st, n_renglones
+
+
+def _orden_natural(texto: str):
+    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", texto)]
+
+
+@mcp.tool()
+def referencia_cruzada(ruta_gx3: str, filtro: str = "") -> str:
+    """Donde se usa cada dispositivo o etiqueta en todo el proyecto (ladder y ST), con su rol:
+    contacto NA/NC, flanco, comparacion, bobina, SET, RST, OUT timer, fuente, destino, argumento FB, lectura/escritura ST.
+
+    filtro: texto o prefijo para limitar la salida (ej. "Y", "D10", "Motor"). Lugar: R<n> renglon, L<n> linea ST.
+    """
+    usos, _, _, _ = _usos(ruta_gx3)
+    grupos: dict[str, list[str]] = {}
+    for operando, prog, lugar, rol in usos:
+        if filtro and not operando.upper().startswith(filtro.upper()):
+            continue
+        grupos.setdefault(operando, []).append(f"{prog} {lugar} {rol}")
+    if not grupos:
+        return "Sin usos" + (f" que empiecen con '{filtro}'." if filtro else ".")
+    salida = []
+    for operando in sorted(grupos, key=_orden_natural):
+        salida.append(f"{operando}")
+        salida += [f"    {u}" for u in sorted(set(grupos[operando]), key=_orden_natural)]
+    return "\n".join(salida)
+
+
+_FB_TIEMPO = re.compile(r"^(TON|TOF|TP|CTU|CTD|CTUD|TIMER_\w+|COUNTER_\w+)(_10)?$")
+
+
+@mcp.tool()
+def revisar_ld(ruta_gx3: str, programa: str = "") -> str:
+    """Revisa el proyecto (o un programa): dobles bobinas, OUT mezclado con SET/RST, SET sin RST, timers usados
+    sin su OUT, salidas Y leidas pero nunca escritas, y timers/contadores FB llamados dentro de IF en ST
+    (precaucion del manual: si la condicion es FALSE no se ejecutan)."""
+    usos, info, st, n_renglones = _usos(ruta_gx3, programa)
+    globales = {v["nombre"] for v in info.values() if v["pou"] == "GLOBAL"}
+    por = {}
+    for operando, prog, lugar, rol in usos:
+        base = re.split(r"[.\[]", operando)[0]
+        # dispositivos y globales son de todo el proyecto; una local con el mismo nombre en otro programa es otra variable
+        clave = operando if _DISP.fullmatch(base) or base in globales else f"{prog[:6]}:{operando}"
+        por.setdefault(clave, []).append((prog, lugar, rol))
+
+    # rangos borrados de golpe (ZRST a[K0] a[K15]): dos destinos del mismo arreglo en el mismo renglon
+    rangos = {}
+    for operando, prog, lugar, rol in usos:
+        m = re.fullmatch(r"(.+)\[K(\d+)\]", operando)
+        if rol == "destino" and m:
+            rangos.setdefault((prog, lugar, m.group(1)), []).append(int(m.group(2)))
+
+    def borrado_en_rango(clave):
+        m = re.fullmatch(r"(.+)\[K(\d+)\]", clave)
+        return bool(m) and any(b.endswith(base) and min(i) <= int(m.group(2)) <= max(i)
+                               for (_, _, base), i in rangos.items() if len(i) == 2
+                               for b in [m.group(1)])
+
+    def donde(op, roles):
+        return ", ".join(f"{p[:6]}:{l}" for p, l, r in por.get(op, []) if r in roles)
+
+    avisos = []
+    for op, lista in por.items():
+        bobinas = [x for x in lista if x[2] in ("bobina", "OUT timer")]
+        if len(bobinas) > 1:
+            avisos.append(f"DOBLE BOBINA {op}: OUT en {donde(op, ('bobina', 'OUT timer'))} (solo cuenta el ultimo)")
+        roles = {r for _, _, r in lista}
+        if bobinas and roles & {"SET", "RST"}:
+            avisos.append(f"MEZCLA {op}: OUT en {donde(op, ('bobina', 'OUT timer'))} y SET/RST en {donde(op, ('SET', 'RST'))}")
+        if "SET" in roles and not roles & {"RST", "bobina", "destino", "escritura ST", "argumento FB"} \
+                and not borrado_en_rango(op):
+            avisos.append(f"SET SIN RST {op}: se activa en {donde(op, ('SET',))} y nada lo desactiva")
+        if re.fullmatch(r"Y[0-7]+", op) and not roles & (_ESCRIBE | {"argumento FB"}):  # un pin de salida de FB tambien escribe
+            avisos.append(f"SALIDA SIN ESCRIBIR {op}: se lee en {donde(op, roles)} pero ningun renglon ni ST la escribe "
+                          "(revisar si la escribe un equipo externo por red o si falta su bobina)")
+        m = re.fullmatch(r"T(\d+)", op)
+        if m and "OUT timer" not in roles and not any(r == "escritura ST" for r in roles):
+            avisos.append(f"TIMER SIN ARRANCAR {op}: se usa en {donde(op, roles)} pero no hay OUT {op}")
+    # ST: timers/contadores FB dentro de IF (cap. 6 del manual de programacion)
+    instancias = {v["nombre"] for v in info.values() if _FB_TIEMPO.match(v["tipo_dato"] or "")}
+    for prog, texto in st.items():
+        nivel = 0
+        for num, linea in enumerate(texto.replace("\r\n", "\n").split("\n"), 1):
+            codigo = re.sub(r"//.*|\(\*.*?\*\)", "", linea).upper()
+            for inst in instancias:
+                if nivel > 0 and re.search(rf"\b{re.escape(inst.upper())}\s*\(", codigo):
+                    avisos.append(f"FB DE TIEMPO EN IF {inst}: {prog[:6]}:L{num} (si la condicion es FALSE no se ejecuta; "
+                                  "llamalo fuera del IF y pasa la condicion como entrada)")
+            nivel += len(re.findall(r"\bIF\b", codigo)) - len(re.findall(r"\bEND_IF\b", codigo))  # \bIF\b no cuenta END_IF ni ELSIF
+            nivel = max(nivel, 0)
+    lineas_st = sum(t.count("\n") + 1 for t in st.values())
+    return "\n".join(sorted(set(avisos))) or (
+        f"Sin problemas en {n_renglones} renglones y {lineas_st} lineas ST (dobles bobinas, OUT+SET/RST, SET sin RST, "
+        "timers sin OUT, salidas sin escribir, FB de tiempo en IF).")
+
+
+def _leer_dispositivos(ip: str, puerto: int, dispositivos: list[str], protocolo: str) -> list[list[int]]:
+    cliente = {"slmp": plc_slmp, "modbus": plc_modbus}.get(protocolo.lower())
+    if not cliente:
+        raise ToolError("protocolo debe ser 'slmp' o 'modbus'.")
+    try:
+        return cliente.leer(ip, puerto, dispositivos)
+    except ValueError as e:
+        raise ToolError(str(e))
+    except (OSError, ConnectionError) as e:
+        raise ToolError(f"No se pudo leer el PLC en {ip}:{puerto} por {protocolo}: {e}. "
+                        f"Verifica que el PLC tenga {protocolo.upper()} habilitado en ese puerto.")
 
 
 @mcp.tool()
@@ -625,16 +829,7 @@ def leer_plc(ip: str, puerto: int, dispositivos: list[str], protocolo: str = "sl
     dispositivos: ej. ["D10", "Y0:8", "M0:4", "X0:16", "TN0"]; 'nombre:cantidad' lee varios seguidos.
     X/Y en octal como en GX Works3.
     """
-    cliente = {"slmp": plc_slmp, "modbus": plc_modbus}.get(protocolo.lower())
-    if not cliente:
-        raise ToolError("protocolo debe ser 'slmp' o 'modbus'.")
-    try:
-        lecturas = cliente.leer(ip, puerto, dispositivos)
-    except ValueError as e:
-        raise ToolError(str(e))
-    except (OSError, ConnectionError) as e:
-        raise ToolError(f"No se pudo leer el PLC en {ip}:{puerto} por {protocolo}: {e}. "
-                        f"Verifica que el PLC tenga {protocolo.upper()} habilitado en ese puerto.")
+    lecturas = _leer_dispositivos(ip, puerto, dispositivos, protocolo)
     salida = []
     for disp, valores in zip(dispositivos, lecturas):
         tipo, inicio = re.fullmatch(r"([A-Z]+)([0-9A-F]+)", disp.strip().upper().split(":")[0]).groups()
@@ -642,6 +837,80 @@ def leer_plc(ip: str, puerto: int, dispositivos: list[str], protocolo: str = "sl
         base = {"X": "o", "Y": "o", "B": "X", "W": "X"}.get(tipo, "d")  # mostrar como GX Works3
         salida += [f"{tipo}{format(inicio + i, base)} = {v}" for i, v in enumerate(valores)]
     return "\n".join(salida)
+
+
+@mcp.tool()
+def monitorear_ld(ruta_gx3: str, programa: str, ip: str, puerto: int, protocolo: str = "slmp") -> str:
+    """Dibuja el ladder con el estado EN VIVO del PLC (como el monitor de GX Works3). SOLO LECTURA.
+
+    ■ contacto que conduce / bobina activa, □ no conduce / inactiva; comparaciones e instrucciones muestran valores.
+    Etiquetas: se leen si tienen dispositivo asignado (global o miembro de estructura); si no, van sin marca.
+    El proyecto debe ser el mismo que esta cargado en el PLC.
+    """
+    usos, info, _, _ = _usos(ruta_gx3, programa)
+    alias = {v["nombre"]: v["dispositivo_asignado"] for v in info.values()
+             if v["dispositivo_asignado"] and not v["dispositivo_asignado"].startswith(("GV:", "LV:", "LLV:", "LLP"))}
+    alias.update(dict(m.split(" = ") for m in _dispositivos_de_miembros(ruta_gx3, {k: v["nombre"] for k, v in info.items()})))
+    pedidos = {}  # (operando, es_palabra) -> dispositivo PLC
+    for operando, _, lugar, rol in usos:
+        if lugar.startswith("R"):
+            palabra = rol in ("comparacion", "fuente", "destino", "operando", "lectura", "argumento FB", "OUT timer") \
+                or _es_palabra(alias.get(operando, operando))
+            clave = _clave_plc(operando, palabra, alias)
+            if clave:
+                pedidos[(operando, palabra)] = clave
+                if rol in ("SET", "RST", "bobina", "contacto NA", "contacto NC"):
+                    pedidos[(operando, False)] = _clave_plc(operando, False, alias)
+    # shortcut: una peticion por dispositivo; agrupar rangos contiguos si un programa grande resulta lento
+    unicos = sorted(set(pedidos.values()), key=_orden_natural)
+    lecturas = dict(zip(unicos, (v[0] for v in _leer_dispositivos(ip, puerto, unicos, protocolo)))) if unicos else {}
+    valores = {k: lecturas[d] for k, d in pedidos.items()}
+    with _abrir(ruta_gx3) as z, tempfile.TemporaryDirectory() as d:
+        c = sqlite3.connect(z.extract(f"{programa}_LDDB.db", d))
+        try:
+            bloques = c.execute("select blocktype, data from LadderBlocks order by pos").fetchall()
+        finally:
+            c.close()
+    nombres = {k: v["nombre"] or k for k, v in info.items()}
+    clases = {k: v["clase"] for k, v in info.items()}
+    salida, n = [f"Monitor {ip}:{puerto} ({protocolo}) - {len(unicos)} dispositivos leidos. ■ conduce/activo  □ no"], 0
+    for tipo, data in bloques:
+        try:
+            lineas = _leer_bloque(data, nombres, clases, valores)
+        except Exception as e:
+            lineas = [f"(no se pudo leer este bloque: {e})"]
+        if tipo in (0, 4):
+            n += 1
+            lineas[0] = f"R{n:<3}" + lineas[0]
+            lineas[1:] = ["    " + l for l in lineas[1:]]
+        salida += lineas
+    return "\n".join(salida)
+
+
+@mcp.tool()
+def estado_plc(ip: str, puerto: int, protocolo: str = "slmp") -> str:
+    """Diagnostico del PLC FX5 (SOLO LECTURA): estado de la CPU, error y su hora, bateria, caida de alimentacion,
+    tiempos de ciclo y reloj. SM/SD segun los comentarios de sistema de GX Works3."""
+    (cpu,), (sm0, sm1), err, (sm51, sm52, sm53), reloj, ciclo = _leer_dispositivos(
+        ip, puerto, ["SD203", "SM0:2", "SD0:7", "SM51:3", "SD210:7", "SD520:6"], protocolo)
+    # shortcut: solo RUN=0 esta verificado en vivo; 2 STOP y 3 PAUSE segun la convencion iQ-F (confirmar en STOP)
+    estado = {0: "RUN", 2: "STOP", 3: "PAUSE"}.get(cpu & 0x0F, f"desconocido ({cpu})")
+    ms = lambda i: ciclo[i] + ciclo[i + 1] / 1000  # SD520 ms + SD521 us, etc.
+    lineas = [
+        f"CPU: {estado} (SD203={cpu})",
+        f"Reloj del PLC: {reloj[0]:04d}-{reloj[1]:02d}-{reloj[2]:02d} {reloj[3]:02d}:{reloj[4]:02d}:{reloj[5]:02d}",
+        f"Ciclo: actual {ms(0):.3f} ms, minimo {ms(2):.3f} ms, maximo {ms(4):.3f} ms",
+    ]
+    if sm0 or sm1:
+        lineas.append(f"ERROR detectado (SM0={sm0}, SM1={sm1}): codigo {err[0] & 0xFFFF:04X}H "
+                      f"a las {err[1]:04d}-{err[2]:02d}-{err[3]:02d} {err[4]:02d}:{err[5]:02d}:{err[6]:02d} "
+                      "(ver el codigo en el Diagnostico de CPU de GX Works3)")
+    else:
+        lineas.append("Sin error (SM0=0, SM1=0)")
+    lineas.append("Bateria: " + ("BAJA ahora (SM52)" if sm52 else "BAJA en algun momento (SM51)" if sm51 else "OK"))
+    if sm53:
+        lineas.append("Hubo caida de alimentacion AC/DC (SM53)")
+    return "\n".join(lineas)
 
 
 if __name__ == "__main__":

@@ -35,8 +35,11 @@ El formato `.gx3` no está documentado. Se entendió analizando proyectos reales
 | `leer_etiquetas` | Lista etiquetas globales, estructuras con sus miembros, etiquetas locales por programa o FB y los dispositivos asignados a mano. | "Qué etiquetas globales hay y a qué dispositivo apuntan?" |
 | `agregar_renglon_ld` | Agrega un renglón con comentario, al final (antes de `END`) o antes de un renglón dado. | "Agrega arranque/paro de Y0 con X0, X1 y enclavamiento." |
 | `borrar_renglon_ld` | Borra el renglón `R<n>` y el comentario que tiene encima. | "Borra el renglón R3." |
-| `revisar_ld` | Detecta dobles bobinas y salidas usadas con `OUT` y con `SET`/`RST` a la vez. | "Revisa si hay dobles bobinas." |
+| `revisar_ld` | Revisa todo el proyecto (o un programa): dobles bobinas, `OUT` mezclado con `SET`/`RST`, `SET` sin `RST` (considera `ZRST` de rangos), timers usados sin su `OUT`, salidas `Y` que nadie escribe y timers/contadores FB llamados dentro de `IF` en ST. Distingue locales con el mismo nombre en programas distintos. | "Revisa el proyecto." |
+| `referencia_cruzada` | Dónde se usa cada dispositivo o etiqueta en ladder y ST, y con qué rol (contacto, bobina, SET, RST, fuente, destino, argumento de FB, lectura o escritura ST). | "¿Dónde se usa X1?" |
 | `leer_plc` | Lee en vivo dispositivos del PLC por SLMP o Modbus/TCP (**solo lectura**). | "Lee X0 a X7, Y0 a Y4 y el valor actual de T0." |
+| `monitorear_ld` | Dibuja el ladder con el estado **en vivo** del PLC, como el monitor de GX Works3: `■` conduce o está activo, `□` no. Las comparaciones e instrucciones muestran sus valores. | "Monitorea el programa principal." |
+| `estado_plc` | Diagnóstico de la CPU: RUN/STOP, error y su hora, batería, caída de alimentación, tiempos de ciclo y reloj. | "¿Cómo está el PLC?" |
 
 Lo que `agregar_renglon_ld` sabe escribir:
 
@@ -145,6 +148,14 @@ X0 = 1   X1 = 1   X2 = 0 ...
 Y0 = 1   ← motor en marcha
 M0 = 0
 TN0 = 30 ← valor actual del temporizador T0 (3.0 s con base de 100 ms)
+```
+
+Monitor en vivo de un arranque/paro (`monitorear_ld`):
+
+```
+R1  |-[X0]■--+-[/X1]■---(Y0)■--
+    |-[Y0]■--+
+R4  |-[/Y1]■---[/Y2]■---[OUT T0 K30]{T0=30}-
 ```
 
 `nombre:cantidad` lee varios dispositivos seguidos. X e Y van en octal, como en GX Works3. Todas las lecturas de una llamada usan **una sola conexión TCP**: el módulo SLMP atiende un cliente por conexión y rechaza las conexiones nuevas que llegan muy seguidas.
