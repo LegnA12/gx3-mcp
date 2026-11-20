@@ -1,0 +1,20 @@
+# Entorno y cache
+.venv/
+__pycache__/
+*.tmp
+
+# Proyectos GX Works3 y respaldos: pueden contener datos de clientes
+*.gx3
+*.bak
+
+# Manuales de Mitsubishi: material con derechos de autor
+*.pdf
+manuales_txt/
+
+# Conocimiento y pruebas con datos privados
+conocimiento_privado/
+pruebas_privadas.py
+
+# Resumenes derivados de manuales de Mitsubishi (se quedan locales)
+conocimiento/instrucciones_fx5.md
+conocimiento/comunicacion_fx5.md
