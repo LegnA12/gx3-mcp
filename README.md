@@ -71,7 +71,7 @@ uv pip install mcp
 Registro en Claude Code (alcance de usuario):
 
 ```
-claude mcp add --scope user gx3 -- <ruta>\.venv\Scripts\python.exe <ruta>\gx3_mcp.py
+claude mcp add --scope user gx3 -- <ruta>\.venv\Scripts\python.exe <ruta>\gx3mcp\gx3_mcp.py
 ```
 
 Reinicia Claude Code y comprueba con `/mcp` que `gx3` aparece conectado.
@@ -346,12 +346,13 @@ X e Y son octales y se guardan leyendo sus dígitos como hexadecimal (por ejempl
 
 ```
 .
-├── gx3_mcp.py              Servidor MCP y herramientas
-├── etiquetas.py            Resuelve _lid/<LabelID>/<RowID> a nombres de etiqueta
-├── plc_slmp.py             Cliente SLMP 3E binario (solo lectura), con autoprueba
-├── plc_modbus.py           Cliente Modbus/TCP (solo lectura), con autoprueba
-├── test_gx3_mcp.py         Pruebas de lectura/edición ST y utilidades
-├── test_ladder.py          Pruebas de codificación y lectura de ladder
+├── gx3mcp/                 Todo el código Python
+│   ├── gx3_mcp.py              Servidor MCP y herramientas
+│   ├── etiquetas.py            Resuelve _lid/<LabelID>/<RowID> a nombres de etiqueta
+│   ├── plc_slmp.py             Cliente SLMP 3E binario (solo lectura), con autoprueba
+│   ├── plc_modbus.py           Cliente Modbus/TCP (solo lectura), con autoprueba
+│   ├── test_gx3_mcp.py         Pruebas de lectura/edición ST y utilidades
+│   └── test_ladder.py          Pruebas de codificación y lectura de ladder
 └── conocimiento/
     └── formato_gx3.md          Formato .gx3 obtenido por ingeniería inversa
 ```
@@ -359,16 +360,16 @@ X e Y son octales y se guardan leyendo sus dígitos como hexadecimal (por ejempl
 > Las pruebas necesitan **tus propios proyectos `.gx3`**, que no se incluyen en el repositorio:
 >
 > ```
-> python test_gx3_mcp.py <proyecto con programas ST>.gx3
-> python test_ladder.py <carpeta con .gx3> <proyecto LD>.gx3 [<proyecto con etiquetas>.gx3]
-> python etiquetas.py <carpeta con .gx3>
+> python gx3mcp/test_gx3_mcp.py <proyecto con programas ST>.gx3
+> python gx3mcp/test_ladder.py <carpeta con .gx3> <proyecto LD>.gx3 [<proyecto con etiquetas>.gx3]
+> python gx3mcp/etiquetas.py <carpeta con .gx3>
 > ```
 >
 > Los clientes del PLC traen su propia autoprueba, que usa un PLC simulado y no necesita hardware:
 >
 > ```
-> python plc_slmp.py
-> python plc_modbus.py
+> python gx3mcp/plc_slmp.py
+> python gx3mcp/plc_modbus.py
 > ```
 
 Para el juego de instrucciones y la comunicación del FX5, consulta los manuales oficiales de Mitsubishi Electric (*MELSEC iQ-F FX5 Programming Manual* y *FX5 User's Manual (Communication)*).
