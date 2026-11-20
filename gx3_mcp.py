@@ -15,6 +15,8 @@ import time
 import uuid
 import zipfile
 
+import plc_modbus  # lectura en vivo del PLC por Modbus/TCP
+import plc_slmp  # lectura en vivo del PLC por SLMP
 from etiquetas import nombres_etiquetas  # _lid/<LabelID>/<RowID> -> nombre, tipo, clase, dispositivo
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError  # su mensaje si llega a Claude
@@ -612,6 +614,34 @@ def revisar_ld(ruta_gx3: str, programa: str) -> str:
     avisos += [f"MEZCLA {k}: OUT en R{', R'.join(map(str, out[k]))} y SET/RST en R{', R'.join(map(str, v))}"
                for k, v in setrst.items() if k in out]
     return "\n".join(avisos) or f"Sin problemas en {len(filas)} renglones (dobles bobinas y OUT+SET/RST)."
+
+
+@mcp.tool()
+def leer_plc(ip: str, puerto: int, dispositivos: list[str], protocolo: str = "slmp") -> str:
+    """Lee en vivo dispositivos de un PLC FX5. SOLO LECTURA.
+
+    protocolo: "slmp" (3E binario TCP; "SLMP Connection Module" con codigo Binary) o
+      "modbus" (Modbus/TCP, normalmente puerto 502; "MODBUS/TCP Connection Module", asignacion inicial FX5).
+    dispositivos: ej. ["D10", "Y0:8", "M0:4", "X0:16", "TN0"]; 'nombre:cantidad' lee varios seguidos.
+    X/Y en octal como en GX Works3.
+    """
+    cliente = {"slmp": plc_slmp, "modbus": plc_modbus}.get(protocolo.lower())
+    if not cliente:
+        raise ToolError("protocolo debe ser 'slmp' o 'modbus'.")
+    try:
+        lecturas = cliente.leer(ip, puerto, dispositivos)
+    except ValueError as e:
+        raise ToolError(str(e))
+    except (OSError, ConnectionError) as e:
+        raise ToolError(f"No se pudo leer el PLC en {ip}:{puerto} por {protocolo}: {e}. "
+                        f"Verifica que el PLC tenga {protocolo.upper()} habilitado en ese puerto.")
+    salida = []
+    for disp, valores in zip(dispositivos, lecturas):
+        tipo, inicio = re.fullmatch(r"([A-Z]+)([0-9A-F]+)", disp.strip().upper().split(":")[0]).groups()
+        inicio = int(inicio, {"X": 8, "Y": 8, "B": 16, "W": 16}.get(tipo, 10))
+        base = {"X": "o", "Y": "o", "B": "X", "W": "X"}.get(tipo, "d")  # mostrar como GX Works3
+        salida += [f"{tipo}{format(inicio + i, base)} = {v}" for i, v in enumerate(valores)]
+    return "\n".join(salida)
 
 
 if __name__ == "__main__":

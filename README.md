@@ -1,6 +1,6 @@
 # gx3-mcp: servidor MCP para proyectos GX Works3 (.gx3)
 
-Servidor **MCP** (Model Context Protocol) en Python que permite a Claude (Claude Code o cualquier cliente MCP) **leer y editar directamente proyectos Mitsubishi GX Works3** (archivos `.gx3`, PLC MELSEC iQ-F / FX5U): listar programas, leer y editar código ST, leer ladder como texto, consultar etiquetas y agregar o borrar renglones ladder.
+Servidor **MCP** (Model Context Protocol) en Python que permite a Claude (Claude Code o cualquier cliente MCP) **leer y editar directamente proyectos Mitsubishi GX Works3** (archivos `.gx3`, PLC MELSEC iQ-F / FX5U): listar programas, leer y editar código ST, leer ladder como texto, consultar etiquetas y agregar o borrar renglones ladder. También **lee en vivo el PLC** por Ethernet (SLMP o Modbus/TCP), en modo solo lectura.
 
 El formato `.gx3` no está documentado. Se entendió analizando proyectos reales (ingeniería inversa) y se validó abriendo los resultados en GX Works3, donde convirtieron y compilaron correctamente.
 
@@ -15,6 +15,7 @@ El formato `.gx3` no está documentado. Se entendió analizando proyectos reales
 - [Qué no puede hacer todavía](#qué-no-puede-hacer-todavía)
 - [Requisitos e instalación](#requisitos-e-instalación)
 - [Ejemplos de uso](#ejemplos-de-uso)
+- [Lectura en vivo del PLC](#lectura-en-vivo-del-plc)
 - [Cómo funciona](#cómo-funciona)
 - [Formato .gx3 en resumen](#formato-gx3-en-resumen)
 - [Seguridad y validación](#seguridad-y-validación)
@@ -35,6 +36,7 @@ El formato `.gx3` no está documentado. Se entendió analizando proyectos reales
 | `agregar_renglon_ld` | Agrega un renglón con comentario, al final (antes de `END`) o antes de un renglón dado. | "Agrega arranque/paro de Y0 con X0, X1 y enclavamiento." |
 | `borrar_renglon_ld` | Borra el renglón `R<n>` y el comentario que tiene encima. | "Borra el renglón R3." |
 | `revisar_ld` | Detecta dobles bobinas y salidas usadas con `OUT` y con `SET`/`RST` a la vez. | "Revisa si hay dobles bobinas." |
+| `leer_plc` | Lee en vivo dispositivos del PLC por SLMP o Modbus/TCP (**solo lectura**). | "Lee X0 a X7, Y0 a Y4 y el valor actual de T0." |
 
 Lo que `agregar_renglon_ld` sabe escribir:
 
@@ -51,7 +53,8 @@ Lo que `agregar_renglon_ld` sabe escribir:
 - **Sin llamadas a FB desde ladder** al escribir (sí se leen).
 - **Borrar renglones todavía no está validado en GX Works3** (agregar sí lo está). Revisa el resultado antes de usarlo.
 - Los nombres de programa salen de `ConvertData` solo si el proyecto **ya fue convertido**. Si no, algunos programas aparecen solo con su hash.
-- No hay acceso en línea al PLC: solo trabaja con archivos `.gx3`.
+- **El acceso al PLC es solo de lectura**: no escribe dispositivos, no fuerza entradas y no descarga programas (eso se hace desde GX Works3).
+- **Modbus/TCP solo está probado contra un esclavo simulado**; SLMP sí está probado con un FX5U real. Modbus asume la asignación inicial "FX5 dedicado".
 
 ## Requisitos e instalación
 
@@ -112,6 +115,56 @@ Leyenda:
 
 X e Y se muestran en octal, como en GX Works3.
 
+## Lectura en vivo del PLC
+
+`leer_plc` consulta el PLC por Ethernet mientras está en RUN, para comprobar que el programa hace lo que se espera. Es **solo lectura**: usa las funciones de lectura de cada protocolo (SLMP `0401`; Modbus FC01, FC02 y FC03) y nunca escribe en el PLC.
+
+| | SLMP | Modbus/TCP |
+|---|---|---|
+| Qué es | Protocolo de Mitsubishi (trama 3E binaria) | Estándar industrial abierto |
+| Dispositivos | Todos (X, Y, M, L, B, F, SM, D, W, R, SD, TS, TN, CS, CN) | Solo los asignados en la tabla Modbus del PLC |
+| Lectura por petición | Hasta 960 palabras o 3584 bits | Hasta 125 registros o 2000 bits |
+| Uso recomendado | Diagnóstico y pruebas | Integración con SCADA o equipos de terceros |
+| Estado | Probado con un FX5U real | Probado contra un esclavo simulado |
+
+### Configuración en GX Works3
+
+*Parámetro → FX5UCPU → Parámetro de módulo → Puerto Ethernet*:
+
+- **SLMP:** en *Basic Settings*, Communication Data Code = **Binary**. En *External Device Configuration*, agrega un **SLMP Connection Module** (TCP, por ejemplo puerto 5000; evita 5549 a 5569, reservados por el sistema).
+- **Modbus/TCP:** en *External Device Configuration*, agrega un **MODBUS/TCP Connection Module** (puerto 502) y deja la asignación de dispositivos inicial (patrón "FX5 dedicado").
+
+Escribe los parámetros al PLC y **reinícialo**: los parámetros Ethernet se aplican al arrancar. Los dos protocolos pueden convivir; comparten el límite de 8 conexiones Ethernet del FX5.
+
+### Ejemplo
+
+```
+leer_plc("192.168.3.250", 5000, ["X0:8", "Y0:5", "M0", "TN0"], protocolo="slmp")
+
+X0 = 1   X1 = 1   X2 = 0 ...
+Y0 = 1   ← motor en marcha
+M0 = 0
+TN0 = 30 ← valor actual del temporizador T0 (3.0 s con base de 100 ms)
+```
+
+`nombre:cantidad` lee varios dispositivos seguidos. X e Y van en octal, como en GX Works3. Todas las lecturas de una llamada usan **una sola conexión TCP**: el módulo SLMP atiende un cliente por conexión y rechaza las conexiones nuevas que llegan muy seguidas.
+
+```mermaid
+sequenceDiagram
+    participant C as Claude
+    participant S as Servidor gx3
+    participant P as PLC FX5U
+    C->>S: leer_plc ip, puerto, dispositivos
+    S->>S: Validar y traducir dispositivos
+    S->>P: Abrir una conexion TCP
+    loop por cada dispositivo
+        S->>P: Peticion de lectura SLMP 0401 o Modbus FC01/02/03
+        P-->>S: Respuesta con los valores, en el END del scan
+    end
+    S->>P: Cerrar la conexion
+    S-->>C: Valores con nombres como en GX Works3
+```
+
 ## Cómo funciona
 
 ### Arquitectura
@@ -130,6 +183,7 @@ flowchart LR
     Z -->|"el usuario abre y convierte"| G["GX Works3"]
     G --> SIM["GX Simulator3"]
     SIM -->|"solo tras probar"| P["PLC FX5U"]
+    S -->|"leer_plc: SLMP o Modbus TCP, solo lectura"| P
 ```
 
 ### Flujo de lectura de `leer_ld`
@@ -294,6 +348,8 @@ X e Y son octales y se guardan leyendo sus dígitos como hexadecimal (por ejempl
 .
 ├── gx3_mcp.py              Servidor MCP y herramientas
 ├── etiquetas.py            Resuelve _lid/<LabelID>/<RowID> a nombres de etiqueta
+├── plc_slmp.py             Cliente SLMP 3E binario (solo lectura), con autoprueba
+├── plc_modbus.py           Cliente Modbus/TCP (solo lectura), con autoprueba
 ├── test_gx3_mcp.py         Pruebas de lectura/edición ST y utilidades
 ├── test_ladder.py          Pruebas de codificación y lectura de ladder
 └── conocimiento/
@@ -307,6 +363,13 @@ X e Y son octales y se guardan leyendo sus dígitos como hexadecimal (por ejempl
 > python test_ladder.py <carpeta con .gx3> <proyecto LD>.gx3 [<proyecto con etiquetas>.gx3]
 > python etiquetas.py <carpeta con .gx3>
 > ```
+>
+> Los clientes del PLC traen su propia autoprueba, que usa un PLC simulado y no necesita hardware:
+>
+> ```
+> python plc_slmp.py
+> python plc_modbus.py
+> ```
 
 Para el juego de instrucciones y la comunicación del FX5, consulta los manuales oficiales de Mitsubishi Electric (*MELSEC iQ-F FX5 Programming Manual* y *FX5 User's Manual (Communication)*).
 
@@ -317,7 +380,10 @@ Para el juego de instrucciones y la comunicación del FX5, consulta los manuales
 - [ ] Contadores.
 - [ ] Llamadas a FB desde ladder.
 - [ ] Validar el borrado de renglones en GX Works3.
-- [ ] Lectura en línea del PLC por SLMP.
+- [x] Lectura en vivo del PLC por SLMP (probada con un FX5U real).
+- [x] Lectura por Modbus/TCP (probada contra un esclavo simulado).
+- [ ] Probar Modbus/TCP con un PLC real.
+- [ ] Escritura controlada de dispositivos (con confirmación explícita y lista de dispositivos permitidos).
 
 ## Contribuir
 
