@@ -4,11 +4,12 @@
 
 | | SLMP (recomendado) | Modbus/TCP |
 |---|---|---|
-| Cliente | `plc_slmp.py` del repo gx3-mcp: un archivo, solo biblioteca estándar, probado con FX5U real | `plc_modbus.py` (solo lectura) o `pymodbus` |
-| Direcciones | Nombres del PLC: `D100`, `M0`, `X10` | Tabla Modbus del PLC (D = holding register 0..) |
+| Cliente | `plc_slmp.py` (`ClienteSLMP`) del repo gx3-mcp | `plc_modbus.py` (`ClienteModbus`, misma interfaz `leer`/`escribir`) |
+| Medido con FX5U real | ~2.5 ms por petición | ~4.7 ms por ciclo leer + escribir |
+| Direcciones | Nombres del PLC: `D100`, `M0`, `X10` | El cliente traduce los mismos nombres con la asignación inicial "FX5 dedicado" (D100 = holding 100, M0 = bobina 8192) |
 | Usar cuando | El otro lado es tu programa Python | Un equipo de terceros solo habla Modbus |
 
-`plc_slmp.py` está en la carpeta `gx3mcp/` del repositorio gx3-mcp (en esta PC: la ruta que muestra `claude mcp get gx3`). **Cópialo** al proyecto de visión; no agregues dependencias.
+Los dos clientes son intercambiables: el código de abajo funciona con `ClienteModbus(IP, 502)` en lugar de `ClienteSLMP`. Modbus se configura en GX Works3 con un **MODBUS/TCP Connection Module** (puerto 502) sin cambiar la asignación de dispositivos. `plc_slmp.py` y `plc_modbus.py` están en la carpeta `gx3mcp/` del repositorio gx3-mcp (en esta PC: la ruta que muestra `claude mcp get gx3`). **Cópialo** al proyecto de visión; no agregues dependencias.
 
 ## Configuración del PLC (GX Works3)
 
@@ -93,7 +94,7 @@ Medido con un FX5U real: unos 2.5 ms por petición con conexión persistente; de
 | Error | Corrección |
 |---|---|
 | Bit "listo" + datos en peticiones separadas | Datos y n.º de solicitud en **una** escritura |
-| Conexión nueva por cada imagen | `ClienteSLMP` persistente; reconectar solo en error |
+| Conexión nueva por cada imagen | Cliente persistente; reconectar solo en error (el FX5 rechaza reconexiones inmediatas) |
 | Mismo puerto SLMP para visión y diagnóstico | Un SLMP Connection Module por cliente |
 | Escribir en Y o en bobinas del programa | Solo registros de intercambio (D101-D105) |
 | Desplazamiento en mm con decimales | Entero en décimas de mm, limitado a ±32767 |

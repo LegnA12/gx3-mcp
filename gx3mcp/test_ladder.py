@@ -228,10 +228,11 @@ print(sal)
 print("simulador ok")
 
 # 17) escribir_plc: sin lista de permitidos o fuera de ella no conecta siquiera
-for permitidos, disp in (("", "D101"), ("D101-D105", "D106"), ("D101-D105", "Y0")):
+for permitidos, disp, proto in (("", "D101", "slmp"), ("D101-D105", "D106", "slmp"), ("D101-D105", "Y0", "slmp"),
+                                ("D101-D105", "D106", "modbus"), ("", "D101", "modbus")):
     os.environ["GX3_ESCRITURA_PERMITIDA"] = permitidos
     try:
-        g.escribir_plc("127.0.0.1", 1, disp, [1])
+        g.escribir_plc("127.0.0.1", 1, disp, [1], proto)
         raise AssertionError(disp)
     except g.ToolError as e:
         assert ("deshabilitada" if not permitidos else "fuera de los permitidos") in str(e), e

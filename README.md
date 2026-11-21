@@ -42,7 +42,7 @@ El formato `.gx3` no está documentado. Se entendió analizando proyectos reales
 | `estado_plc` | Diagnóstico de la CPU: RUN/STOP, error y su hora, batería, caída de alimentación, tiempos de ciclo y reloj. | "¿Cómo está el PLC?" |
 | `diagnosticar_modbus_rtu` | Diagnóstico de los canales serie MODBUS RTU (`ADPRW`): modo, formato (bps/paridad), reintentos, timeouts y el último error traducido (por ejemplo `7309H` = el esclavo no responde, `730AH` con su excepción). | "¿Por qué no responde el sensor del CH1?" |
 | `simular_ld` | Ejecuta un programa ladder **sin PLC**, ciclo a ciclo, con los pasos que le indiques (`{"X0": 1}`, `{"segundos": 3}`...). Reporta los dispositivos después de cada paso y avisa lo que no puede simular (ST, FB, instrucciones no soportadas). | "Simula: pulso X0, espera 3 s, activa X1. ¿Qué hace Y0?" |
-| `escribir_plc` | **Escribe** dispositivos en el PLC por SLMP (`1401`) y los relee para confirmar. Solo dentro de los rangos de la variable de entorno `GX3_ESCRITURA_PERMITIDA`; sin ella no escribe nada. | "Pon D100 en 25." |
+| `escribir_plc` | **Escribe** dispositivos en el PLC por SLMP (`1401`) o Modbus/TCP (FC0F/FC10) y los relee para confirmar. Solo dentro de los rangos de la variable de entorno `GX3_ESCRITURA_PERMITIDA`; sin ella no escribe nada. | "Pon D100 en 25." |
 
 Lo que `agregar_renglon_ld` sabe escribir:
 
@@ -61,8 +61,9 @@ Lo que `agregar_renglon_ld` sabe escribir:
 - **Borrar renglones todavía no está validado en GX Works3** (agregar sí lo está). Revisa el resultado antes de usarlo.
 - Los nombres de programa salen de `ConvertData` solo si el proyecto **ya fue convertido**. Si no, algunos programas aparecen solo con su hash.
 - **El simulador** cubre contactos, flancos, comparaciones, bobinas, `SET`/`RST`, timers, `MOV`/`DMOV`/`EMOV`, `INC`/`DEC`, `ZRST`, `BMOV` y `FMOV`. No ejecuta ST ni FB, y el formato de los contadores es supuesto (sin ejemplo real todavía).
-- **La escritura al PLC** es solo de dispositivos dentro de la lista permitida y solo por SLMP: no fuerza entradas ni descarga programas (eso se hace desde GX Works3).
-- **Modbus/TCP solo está probado contra un esclavo simulado**; SLMP sí está probado con un FX5U real. Modbus asume la asignación inicial "FX5 dedicado".
+- **La escritura al PLC** es solo de dispositivos dentro de la lista permitida: no fuerza entradas ni descarga programas (eso se hace desde GX Works3).
+- **Modbus asume la asignación inicial "FX5 dedicado"** (D = holding register 0..., M = bobina 8192...). Si se cambia en GX Works3, las direcciones no coinciden.
+- **El FX5 rechaza a veces una conexión abierta justo después de cerrar otra** (sin pausa, 2 de 4 fallaron; con 50 ms, ninguna). En programas que leen seguido usa `ClienteSLMP` o `ClienteModbus`, que mantienen la conexión abierta.
 
 ## Requisitos e instalación
 
@@ -145,7 +146,7 @@ X e Y se muestran en octal, como en GX Works3.
 | Dispositivos | Todos (X, Y, M, L, B, F, SM, D, W, R, SD, TS, TN, CS, CN) | Solo los asignados en la tabla Modbus del PLC |
 | Lectura por petición | Hasta 960 palabras o 3584 bits | Hasta 125 registros o 2000 bits |
 | Uso recomendado | Diagnóstico y pruebas | Integración con SCADA o equipos de terceros |
-| Estado | Probado con un FX5U real | Probado contra un esclavo simulado |
+| Estado | Probado con un FX5U real | Probado con un FX5U real (lectura FC01-03, escritura FC0F/FC10) |
 
 ### Configuración en GX Works3
 
@@ -378,9 +379,11 @@ X e Y son octales y se guardan leyendo sus dígitos como hexadecimal (por ejempl
 │   ├── gx3_mcp.py              Servidor MCP y herramientas
 │   ├── etiquetas.py            Resuelve _lid/<LabelID>/<RowID> a nombres de etiqueta
 │   ├── plc_slmp.py             Cliente SLMP 3E binario (lectura y escritura, ClienteSLMP persistente), con autoprueba
-│   ├── plc_modbus.py           Cliente Modbus/TCP (solo lectura), con autoprueba
+│   ├── plc_modbus.py           Cliente Modbus/TCP (lectura FC01-03, escritura FC0F/FC10), con autoprueba
 │   ├── test_gx3_mcp.py         Pruebas de lectura/edición ST y utilidades
 │   └── test_ladder.py          Pruebas de codificación y lectura de ladder
+├── ejemplos/
+│   └── prueba_modbus_tcp.py    Lee y escribe por Modbus/TCP contra el programa de ejemplo
 ├── skills/plc-fx5-gx3/     Skill para Claude Code
 │   ├── SKILL.md                Qué herramienta usar y flujo seguro de edición
 │   └── vision-plc.md           Conectar software Python de visión al PLC (SLMP)
@@ -417,7 +420,7 @@ Para el juego de instrucciones y la comunicación del FX5, consulta los manuales
 - [ ] Validar el borrado de renglones en GX Works3.
 - [x] Lectura en vivo del PLC por SLMP (probada con un FX5U real).
 - [x] Lectura por Modbus/TCP (probada contra un esclavo simulado).
-- [ ] Probar Modbus/TCP con un PLC real.
+- [x] Probar Modbus/TCP con un PLC real (lectura y escritura, idéntico a SLMP).
 - [x] Escritura controlada de dispositivos por SLMP (lista de dispositivos permitidos y relectura).
 - [x] Simulador del ladder en Python (sin PLC).
 - [x] Skill para Claude Code (`skills/plc-fx5-gx3`), con guía para conectar software de visión al PLC.

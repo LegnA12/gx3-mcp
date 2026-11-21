@@ -1014,8 +1014,10 @@ def diagnosticar_modbus_rtu(ip: str, puerto: int, canal: int = 0, protocolo: str
 
 # ---------------- Escritura controlada al PLC ----------------
 @mcp.tool()
-def escribir_plc(ip: str, puerto: int, dispositivo: str, valores: list[int]) -> str:
-    """ESCRIBE en el PLC FX5 por SLMP (comando 1401) y relee para confirmar. Usar SOLO si la persona lo pidio.
+def escribir_plc(ip: str, puerto: int, dispositivo: str, valores: list[int], protocolo: str = "slmp") -> str:
+    """ESCRIBE en el PLC FX5 y relee para confirmar. Usar SOLO si la persona lo pidio.
+
+    protocolo: "slmp" (comando 1401) o "modbus" (FC0F bobinas / FC10 registros, asignacion inicial FX5 dedicado).
 
     Solo escribe dentro de los rangos de la variable de entorno GX3_ESCRITURA_PERMITIDA del servidor MCP
     (ej. "M100-M199, D100-D199"); sin ella no escribe nada. dispositivo: inicio, ej. "M100" o "D100";
@@ -1027,7 +1029,13 @@ def escribir_plc(ip: str, puerto: int, dispositivo: str, valores: list[int]) -> 
         raise ToolError("Escritura deshabilitada: define GX3_ESCRITURA_PERMITIDA en la configuracion del servidor MCP "
                         "(ej. claude mcp add ... -e GX3_ESCRITURA_PERMITIDA=\"M100-M199,D100-D199\").")
     try:
-        leidos = plc_slmp.escribir(ip, puerto, dispositivo, valores, permitidos)
+        if protocolo.lower() == "modbus":
+            plc_slmp.verificar_permiso(dispositivo, len(valores), permitidos)
+            leidos = plc_modbus.escribir(ip, puerto, dispositivo, valores)
+        elif protocolo.lower() == "slmp":
+            leidos = plc_slmp.escribir(ip, puerto, dispositivo, valores, permitidos)
+        else:
+            raise ValueError("protocolo debe ser 'slmp' o 'modbus'.")
     except (ValueError, PermissionError) as e:
         raise ToolError(str(e))
     except (OSError, ConnectionError) as e:

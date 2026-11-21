@@ -114,12 +114,18 @@ def _validar_escritura(dispositivo: str, valores: list[int]) -> tuple[str, int, 
     return tipo, numero, len(valores)
 
 
+def verificar_permiso(dispositivo: str, n: int, permitidos: str) -> None:
+    """PermissionError si los n puntos desde 'dispositivo' no caen completos en un rango permitido."""
+    tipo, numero, _ = _parsear(dispositivo)
+    if not any(t == tipo and a <= numero and numero + n - 1 <= b for t, a, b in rangos_permitidos(permitidos)):
+        raise PermissionError(f"{dispositivo} ({n} puntos) esta fuera de los permitidos: {permitidos}")
+
+
 def escribir(ip: str, puerto: int, dispositivo: str, valores: list[int], permitidos: str,
              timeout: float = 3.0) -> list[int]:
     """Escribe valores seguidos desde 'dispositivo' SOLO si todo el tramo cae en 'permitidos'; devuelve la relectura."""
-    tipo, numero, n = _validar_escritura(dispositivo, valores)
-    if not any(t == tipo and a <= numero and numero + n - 1 <= b for t, a, b in rangos_permitidos(permitidos)):
-        raise PermissionError(f"{dispositivo} ({n} puntos) esta fuera de los permitidos: {permitidos}")
+    _, _, n = _validar_escritura(dispositivo, valores)
+    verificar_permiso(dispositivo, n, permitidos)
     with ClienteSLMP(ip, puerto, timeout) as plc:
         plc.escribir(dispositivo, valores)
         return plc.leer([f"{dispositivo}:{n}"])[0]
