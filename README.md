@@ -2,7 +2,7 @@
 
 Servidor **MCP** (Model Context Protocol) en Python que permite a Claude (Claude Code o cualquier cliente MCP) **leer y editar directamente proyectos Mitsubishi GX Works3** (archivos `.gx3`, PLC MELSEC iQ-F / FX5U): listar programas, leer y editar código ST, leer ladder como texto, consultar etiquetas y agregar o borrar renglones ladder. También **lee en vivo el PLC** por Ethernet (SLMP o Modbus/TCP), en modo solo lectura.
 
-Se desarrolló en un entorno controlado, con proyectos de prueba propios y un PLC de laboratorio, observando cómo GX Works3 guarda cada elemento. Todo lo que el servidor escribe se validó abriendo los resultados en GX Works3, donde convierten y compilan correctamente.
+Se desarrolló en un entorno controlado, con proyectos de prueba propios y un PLC de laboratorio, con el objetivo de lograr interoperabilidad con los proyectos de GX Works3. Todo lo que el servidor escribe se validó abriendo los resultados en GX Works3, donde convierten y compilan correctamente.
 
 > [!WARNING]
 > **Proyecto no oficial, sin relación con Mitsubishi Electric.**
