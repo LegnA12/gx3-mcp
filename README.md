@@ -2,7 +2,7 @@
 
 Servidor **MCP** (Model Context Protocol) en Python que permite a Claude (Claude Code o cualquier cliente MCP) **leer y editar directamente proyectos Mitsubishi GX Works3** (archivos `.gx3`, PLC MELSEC iQ-F / FX5U): listar programas, leer y editar código ST, leer ladder como texto, consultar etiquetas y agregar o borrar renglones ladder. También **lee en vivo el PLC** por Ethernet (SLMP o Modbus/TCP), en modo solo lectura.
 
-El formato `.gx3` no está documentado. Se entendió analizando proyectos reales (ingeniería inversa) y se validó abriendo los resultados en GX Works3, donde convirtieron y compilaron correctamente.
+Se desarrolló en un entorno controlado, con proyectos de prueba propios y un PLC de laboratorio, con el objetivo de lograr interoperabilidad con los proyectos de GX Works3. Todo lo que el servidor escribe se validó abriendo los resultados en GX Works3, donde convierten y compilan correctamente.
 
 > [!WARNING]
 > **Proyecto no oficial, sin relación con Mitsubishi Electric.**
@@ -68,22 +68,42 @@ Lo que `agregar_renglon_ld` sabe escribir:
 ## Requisitos e instalación
 
 - Python 3.12
-- [uv](https://docs.astral.sh/uv/)
+- El paquete `mcp` **2.0 o mayor** (es la única dependencia; lo demás es biblioteca estándar)
 - Un cliente MCP (por ejemplo Claude Code)
+
+`<ruta>` es la carpeta donde clonaste el repositorio. Crea un entorno virtual en `<ruta>\.venv` e instala `mcp` con **cualquiera** de las dos opciones:
 
 ```
 cd <ruta>
+
+# Opción A: Python estándar (no necesita instalar nada más)
+py -3.12 -m venv .venv
+.venv\Scripts\python.exe -m pip install "mcp>=2"
+
+# Opción B: uv (más rápido, si ya lo tienes)
 uv venv
-uv pip install mcp
+uv pip install "mcp>=2"
 ```
 
-Registro en Claude Code (alcance de usuario):
+> [!NOTE]
+> **¿Hace falta uv?** No. El proyecto no tiene `pyproject.toml` ni `uv.lock`; `uv` solo se usa para crear el `.venv` e instalar `mcp`, que es justo lo que hacen `venv` y `pip`. Las dos opciones dejan el mismo `.venv\Scripts\python.exe`.
+>
+> **Versión de `mcp`:** el servidor usa `mcp.server.mcpserver.MCPServer`, que existe desde `mcp` 2. Con `mcp` 1.x (probado con 1.30.0) falla al arrancar con `No module named 'mcp.server.mcpserver'`.
+
+Comprueba que el entorno quedó bien:
+
+```
+.venv\Scripts\python.exe -c "from mcp.server.mcpserver import MCPServer; print('OK')"
+```
+
+Registro en Claude Code (alcance de usuario, disponible en todos tus proyectos):
 
 ```
 claude mcp add --scope user gx3 -- <ruta>\.venv\Scripts\python.exe <ruta>\gx3mcp\gx3_mcp.py
+claude mcp get gx3
 ```
 
-Reinicia Claude Code y comprueba con `/mcp` que `gx3` aparece conectado.
+`claude mcp get gx3` debe mostrar `Status: ✔ Connected`. Reinicia Claude Code y comprueba con `/mcp` que `gx3` aparece conectado. El registro guarda rutas absolutas: si mueves la carpeta, quítalo con `claude mcp remove gx3 -s user` y vuelve a agregarlo.
 
 **Escritura al PLC (opcional).** `escribir_plc` está deshabilitada hasta que defines qué dispositivos puede tocar:
 
@@ -248,11 +268,11 @@ flowchart TD
 
 El renglón agregado queda **sin convertir** (`translated=0`). Al convertir, GX Works3 solo cambia ese campo a `1` y genera el IL correspondiente.
 
-### Cómo se aprendió el formato (ingeniería inversa)
+### Cómo se validó cada elemento
 
 ```mermaid
 flowchart TD
-    A["Proyectos reales .gx3"] --> B["Extraer y comparar las bases SQLite"]
+    A["Proyectos de prueba propios .gx3"] --> B["Extraer y comparar las bases SQLite"]
     B --> C["Hipotesis sobre el formato"]
     C --> D["Generar un renglon con el servidor"]
     D --> E["Comparar byte a byte con renglones reales"]
@@ -388,7 +408,7 @@ X e Y son octales y se guardan leyendo sus dígitos como hexadecimal (por ejempl
 │   ├── SKILL.md                Qué herramienta usar y flujo seguro de edición
 │   └── vision-plc.md           Conectar software Python de visión al PLC (SLMP)
 └── conocimiento/
-    └── formato_gx3.md          Formato .gx3 obtenido por ingeniería inversa
+    └── formato_gx3.md          Notas técnicas del formato .gx3
 ```
 
 > Las pruebas necesitan **tus propios proyectos `.gx3`**, que no se incluyen en el repositorio:
@@ -398,6 +418,18 @@ X e Y son octales y se guardan leyendo sus dígitos como hexadecimal (por ejempl
 > python gx3mcp/test_ladder.py <carpeta con .gx3> <proyecto LD>.gx3 [<proyecto con etiquetas>.gx3]
 > python gx3mcp/etiquetas.py <carpeta con .gx3>
 > ```
+>
+> Las pruebas trabajan sobre **copias** en una carpeta temporal; tus proyectos no se modifican. Ten en cuenta:
+>
+> - Usa el Python del entorno (`.venv\Scripts\python.exe`), que es el que tiene `mcp`.
+> - En la consola de Windows define antes `$env:PYTHONIOENCODING = "utf-8"` (PowerShell). Sin eso, `test_ladder.py` se cae al imprimir `↑` con `UnicodeEncodeError`. Al servidor MCP no le afecta.
+> - El `<proyecto con programas ST>` debe tener al menos un programa ST.
+> - `test_ladder.py` provoca errores a propósito y espera avisos concretos, así que en el `<proyecto LD>` el **primer** programa que muestra `listar_programas` debe:
+>   - ser ladder con `END` y pasar `revisar_ld` sin problemas;
+>   - tener ya una bobina `Y0` y un contacto `X1`;
+>   - no usar `M5`, `M7`, `T9` ni `Y7`.
+>
+>   Si tu proyecto no cumple, haz una copia de un proyecto LD sencillo y agrégale con `agregar_renglon_ld` el renglón `(X0 OR X1) → Y0`.
 >
 > Los clientes del PLC traen su propia autoprueba, que usa un PLC simulado y no necesita hardware:
 >
