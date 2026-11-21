@@ -193,4 +193,48 @@ try:
 finally:
     g.plc_slmp.leer = original
 print("diagnostico Modbus RTU ok")
+
+# 16) Simulador: renglones generados por el codificador, ejecutados ciclo a ciclo (10 ms)
+R = lambda cols, sal: g._renglon(cols, sal)[0]
+sim = g._Simulador([R([["X0", "Y0"], ["/X1"]], "Y0"), R([["Y0"]], "OUT T0 K30"), R([["T0"]], "Y1"),
+                    R([["X2"]], "INCP D10"), R([[">= D10 K2"]], "SET M0"), R([["X3"]], "ZRST M0 M15"),
+                    R([["X4"], ["X5", "X6"], ["/X7"]], "Y2"), R([["E> D20 E0.5"]], "Y3"), R([["X0"]], "EMOV E1.0 D20"),
+                    R([["X0"]], "BMOV D10 D100 K2"), R([["↓X4"]], "Y4")], {}, {}, 10)
+m = sim.mem
+def correr(n=1, **pon):
+    for k, v in pon.items():
+        sim.escribir(k, False, v)
+    for _ in range(n):
+        sim.ciclo()
+correr(X0=1); assert m["Y0"] == 1 and m["D100"] == 0 and m["Y3"] == 0  # Y3 lee D20 antes del EMOV
+correr(X0=0); assert m["Y0"] == 1 and m["Y3"] == 1                     # enclavado; EMOV ya dejo 1.0
+correr(297); assert m["TS0"] == 0 and m["TN0"] == 29 and m["Y1"] == 0  # 299 ciclos x 10 ms = 2.99 s
+correr(); assert m["TS0"] == 1 and m["TN0"] == 30 and m["Y1"] == 1     # 3.0 s: T0 K30
+correr(X1=1); assert m["Y0"] == 0 and m["TS0"] == 0 and m["Y1"] == 0   # paro: timer se reinicia
+correr(3, X2=1); assert m["D10"] == 1                                   # INCP: una vez por flanco
+correr(X2=0); correr(X2=1); assert m["D10"] == 2 and m["M0"] == 1      # >= D10 K2 -> SET M0
+correr(X3=1); assert m["M0"] == 0                                       # ZRST va despues del SET
+correr(X0=1, X1=0); assert m["D100"] == 2 and m["D101"] == 0           # BMOV D10 D100 K2
+correr(X4=1, X5=0, X6=1, X7=0); assert m["Y2"] == 1                    # OR a media linea
+correr(X6=0); assert m["Y2"] == 0
+correr(X7=1, X6=1); assert m["Y2"] == 0
+correr(X4=0); assert m["Y4"] == 1                                       # flanco de bajada: un ciclo
+correr(); assert m["Y4"] == 0
+assert not sim.avisos, sim.avisos
+# herramienta completa sobre la copia con renglones agregados
+sal = g.simular_ld(c3, prog, [{"X10": 1}, {"segundos": 0.5}, {"X77": 1}], mostrar=["M5", "T0"])
+assert sal.startswith("Simulacion") and "Paso 3" in sal and "M5=1" in sal and "TN0=" in sal and "X77" in sal, sal
+print(sal)
+print("simulador ok")
+
+# 17) escribir_plc: sin lista de permitidos o fuera de ella no conecta siquiera
+for permitidos, disp in (("", "D101"), ("D101-D105", "D106"), ("D101-D105", "Y0")):
+    os.environ["GX3_ESCRITURA_PERMITIDA"] = permitidos
+    try:
+        g.escribir_plc("127.0.0.1", 1, disp, [1])
+        raise AssertionError(disp)
+    except g.ToolError as e:
+        assert ("deshabilitada" if not permitidos else "fuera de los permitidos") in str(e), e
+os.environ.pop("GX3_ESCRITURA_PERMITIDA")
+print("escritura protegida ok")
 print("TODO OK")

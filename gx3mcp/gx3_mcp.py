@@ -575,7 +575,7 @@ def agregar_renglon_ld(ruta_gx3: str, programa: str, columnas: list[list[str]], 
                        comentario: str, ruta_salida: str, antes_de_renglon: int = 0) -> str:
     """Agrega un renglon ladder con un comentario encima. Por defecto al final (antes de END).
 
-    columnas: grupos en serie (AND); cada grupo lista contactos en paralelo (OR, solo en el primer grupo).
+    columnas: grupos en serie (AND); cada grupo lista contactos en paralelo (OR, en cualquier grupo).
       Contactos: 'X0' NA, '/X0' NC, '↑X0' flanco de subida, '↓X0' flanco de bajada,
       '>= D10 K100' comparacion (=, <>, >, <, >=, <=; operandos D/R/W/SD o K).
       Solo dispositivos directos (X0, M10, D5...), no etiquetas.
@@ -640,7 +640,7 @@ def borrar_renglon_ld(ruta_gx3: str, programa: str, renglon: int, ruta_salida: s
 _PAL = {"D", "R", "SD", "TN", "CN"}
 # shortcut: sin B/W (numeracion hex): se omiten en el monitor y en el ST hasta verificar su formato en ladder
 _DISP = re.compile(r"(SM|SD|TS|TN|CS|CN|X|Y|M|L|F|D|R|T|C)(\d+)")
-_CONSTANTE = re.compile(r"[KHE]-?[\d.]+")
+_CONSTANTE = re.compile(r"K-?\d+|H[\dA-F]+|E-?[\d.]+(e[-+]?\d+)?")
 # instruccion -> indices de operandos que ESCRIBE (el resto se leen). shortcut: lista corta; el resto se marca "operando"
 _DESTINOS = {"MOV": [-1], "MOVP": [-1], "DMOV": [-1], "DMOVP": [-1], "EMOV": [-1], "EMOVP": [-1],
              "BMOV": [1], "BMOVP": [1], "FMOV": [1], "FMOVP": [1], "ZRST": [0, 1], "ZRSTP": [0, 1],
@@ -880,9 +880,7 @@ def monitorear_ld(ruta_gx3: str, programa: str, ip: str, puerto: int, protocolo:
     El proyecto debe ser el mismo que esta cargado en el PLC.
     """
     usos, info, _, _ = _usos(ruta_gx3, programa)
-    alias = {v["nombre"]: v["dispositivo_asignado"] for v in info.values()
-             if v["dispositivo_asignado"] and not v["dispositivo_asignado"].startswith(("GV:", "LV:", "LLV:", "LLP"))}
-    alias.update(dict(m.split(" = ") for m in _dispositivos_de_miembros(ruta_gx3, {k: v["nombre"] for k, v in info.items()})))
+    alias = _alias(ruta_gx3, info)
     pedidos = {}  # (operando, es_palabra) -> dispositivo PLC
     for operando, _, lugar, rol in usos:
         if lugar.startswith("R"):
@@ -1011,6 +1009,260 @@ def diagnosticar_modbus_rtu(ip: str, puerto: int, canal: int = 0, protocolo: str
         else:
             lineas.append("    sin error registrado")
         salida += lineas
+    return "\n".join(salida)
+
+
+# ---------------- Escritura controlada al PLC ----------------
+@mcp.tool()
+def escribir_plc(ip: str, puerto: int, dispositivo: str, valores: list[int]) -> str:
+    """ESCRIBE en el PLC FX5 por SLMP (comando 1401) y relee para confirmar. Usar SOLO si la persona lo pidio.
+
+    Solo escribe dentro de los rangos de la variable de entorno GX3_ESCRITURA_PERMITIDA del servidor MCP
+    (ej. "M100-M199, D100-D199"); sin ella no escribe nada. dispositivo: inicio, ej. "M100" o "D100";
+    valores: uno por punto seguido (bits 0/1, palabras -32768..65535). Una bobina que el programa maneja
+    se sobrescribe en el siguiente ciclo: escribir en marcas/registros de intercambio, no en salidas del programa.
+    """
+    permitidos = os.environ.get("GX3_ESCRITURA_PERMITIDA", "").strip()
+    if not permitidos:
+        raise ToolError("Escritura deshabilitada: define GX3_ESCRITURA_PERMITIDA en la configuracion del servidor MCP "
+                        "(ej. claude mcp add ... -e GX3_ESCRITURA_PERMITIDA=\"M100-M199,D100-D199\").")
+    try:
+        leidos = plc_slmp.escribir(ip, puerto, dispositivo, valores, permitidos)
+    except (ValueError, PermissionError) as e:
+        raise ToolError(str(e))
+    except (OSError, ConnectionError) as e:
+        raise ToolError(f"No se pudo escribir en {ip}:{puerto}: {e}")
+    estado = "confirmado" if leidos == list(valores) else "DISTINTO a lo escrito (el programa lo sobrescribe?)"
+    return f"Escrito {dispositivo} = {list(valores)}; relectura {leidos}: {estado}."
+
+
+# ---------------- Simulador de ladder (sin PLC) ----------------
+def _alias(ruta_gx3: str, info: dict) -> dict:
+    """Etiqueta (global o miembro de estructura) -> dispositivo asignado."""
+    alias = {v["nombre"]: v["dispositivo_asignado"] for v in info.values()
+             if v["dispositivo_asignado"] and not v["dispositivo_asignado"].startswith(("GV:", "LV:", "LLV:", "LLP"))}
+    alias.update(dict(m.split(" = ") for m in _dispositivos_de_miembros(ruta_gx3, {k: v["nombre"] for k, v in info.items()})))
+    return alias
+
+
+def _palabra16(v):
+    return v if isinstance(v, float) else (int(v) + 32768) % 65536 - 32768
+
+
+class _Simulador:
+    """Ejecuta los renglones ciclo a ciclo sobre una memoria {dispositivo: valor}, como el scan del PLC.
+    Flujo de potencia por columnas: celda vacia dentro del tramo dibujado = linea; verticales unen filas (OR)."""
+
+    def __init__(self, bloques: list[str], nombres: dict, alias: dict, ms: int):
+        self.nombres, self.alias, self.ms = nombres, alias, ms
+        self.mem = {"SM400": 1, "SM402": 1, "SM8000": 1, "SM8002": 1}  # siempre ON y pulso del primer ciclo
+        self.previo, self.acum, self.escritos, self.leidos, self.avisos = {}, {}, set(), set(), set()
+        self.rejillas = []
+        for i, data in enumerate(bloques, 1):
+            cad, texto = _separar(data)
+            arbol = _arbol(texto, cad)
+            if arbol.get("_") == "cb":
+                self.rejillas.append((i, arbol["fg"]))
+            elif arbol.get("_") == "fbcs":
+                self.avisos.add(f"R{i}: llamada a FB no simulada")
+
+    def clave(self, texto: str, palabra: bool) -> str:
+        return _clave_plc(texto, palabra, self.alias) or texto
+
+    def leer(self, texto: str, palabra: bool):
+        if _CONSTANTE.fullmatch(texto):
+            return float(texto[1:]) if texto[0] == "E" else int(texto[1:], 16 if texto[0] == "H" else 10)
+        k = self.clave(texto, palabra)
+        self.leidos.add(k)
+        return self.mem.get(k, 0)
+
+    def escribir(self, texto: str, palabra: bool, valor):
+        k = self.clave(texto, palabra)
+        self.mem[k] = valor
+        self.escritos.add(k)
+
+    def reset(self, texto: str):  # RST/ZRST: bit, palabra y, en T/C, contacto + valor actual
+        self.escribir(texto, False, 0)
+        self.escribir(texto, True, 0)
+        self.acum.pop(self.alias.get(texto, texto), None)
+
+    def serie(self, texto: str, n: int) -> list[str]:
+        m = _DISP.fullmatch(self.alias.get(texto, texto))
+        if not m:
+            raise ToolError(f"No se puede recorrer un rango desde '{texto}'")
+        tipo, num = m.groups()
+        octal = tipo in ("X", "Y")
+        ini = int(num, 8 if octal else 10)
+        return [f"{tipo}{format(ini + i, 'o' if octal else 'd')}" for i in range(n)]
+
+    def elemento(self, s: dict, p: bool, k: tuple) -> bool:
+        op = s["op"]
+        nombre, ct = op["op"], op.get("ct", "a")
+        args = [_operando(a, self.nombres) for a in s.get("args", [])]
+        if op["_"] == "ct":
+            if nombre in ("a", "b"):
+                v = bool(self.leer(args[0], False))
+                if ct in ("p", "f"):  # flanco del dispositivo, memoria propia de cada contacto
+                    antes, self.previo[k] = self.previo.get(k, False), v
+                    v = (v and not antes) if ct == "p" else (antes and not v)
+                return p and (v if nombre == "a" else not v)
+            if nombre in _COMPARAR:
+                return p and _COMPARAR[nombre](*(self.leer(a, True) for a in args))
+            self.avisos.add(f"contacto '{nombre}' no simulado (no conduce)")
+            return False
+        base = nombre[:-1] if nombre.endswith("P") and nombre[:-1] in _SIMULADAS else nombre
+        if ct == "p" or base != nombre:  # instruccion de pulso: solo en el flanco de subida de su condicion
+            ejecuta, self.previo[k] = p and not self.previo.get(k, False), p
+        else:
+            ejecuta = p
+        if nombre == "c":
+            self.escribir(args[0], False, int(p))
+        elif nombre in ("SET", "RST"):
+            if ejecuta:
+                self.escribir(args[0], False, 1) if nombre == "SET" else self.reset(args[0])
+        elif nombre.startswith("OUT") and args:
+            dev, preset = args[0], self.leer(args[1], True) if len(args) > 1 else 0
+            if self.alias.get(dev, dev).startswith("C"):
+                # shortcut: formato de OUT C sin ejemplo real todavia; se asume contador de flanco hasta el preset
+                if p and not self.previo.get(k, False) and self.leer(dev, True) < preset:
+                    self.escribir(dev, True, self.leer(dev, True) + 1)
+                self.previo[k] = p
+                self.escribir(dev, False, int(self.leer(dev, True) >= preset))
+            else:  # timer: T 100 ms, OUTH 10 ms, OUTHS 1 ms; sin condicion se reinicia
+                unidad = 1 if nombre.startswith("OUTHS") else 10 if nombre.startswith("OUTH") else 100
+                d = self.alias.get(dev, dev)
+                self.acum[d] = self.acum.get(d, 0) + self.ms if p else 0
+                tn = min(self.acum[d] // unidad, preset)
+                self.escribir(dev, True, tn)
+                self.escribir(dev, False, int(p and tn >= preset))
+        elif base not in _SIMULADAS:
+            self.avisos.add(f"instruccion {nombre} no simulada (se ignora)")
+        elif ejecuta:
+            if base in ("MOV", "DMOV", "EMOV"):
+                v = self.leer(args[0], True)
+                self.escribir(args[1], True, _palabra16(v) if base == "MOV" else v)  # shortcut: D/E en una sola clave
+            elif base in ("INC", "DEC"):
+                self.escribir(args[0], True, _palabra16(self.leer(args[0], True) + (1 if base == "INC" else -1)))
+            elif base == "ZRST":
+                a, b = (_DISP.fullmatch(self.alias.get(x, x)) for x in args)
+                octal = a.group(1) in ("X", "Y")
+                n = int(b.group(2), 8 if octal else 10) - int(a.group(2), 8 if octal else 10) + 1
+                for x in self.serie(args[0], n):
+                    self.reset(x)
+            elif base == "BMOV":
+                n = int(self.leer(args[2], True))
+                datos = [self.leer(x, True) for x in self.serie(args[0], n)]
+                for x, v in zip(self.serie(args[1], n), datos):
+                    self.escribir(x, True, v)
+            elif base == "FMOV":
+                v = self.leer(args[0], True)
+                for x in self.serie(args[1], int(self.leer(args[2], True))):
+                    self.escribir(x, True, v)
+        return p
+
+    def rejilla(self, i: int, fg: dict):
+        cols, filas = (int(x) for x in fg["dim"].split("x"))
+        celdas = {tuple(int(x) for x in e["pos"].split(",")): e["s"] for e in fg.get("es", [])}
+        vert = {tuple(int(x) for x in v["pos"].split(",")) for v in fg.get("vs", [])}
+        tramo = {}  # mismo criterio que _dibujar: lineas horizontales implicitas entre lo usado en la fila
+        for r in range(filas):
+            usados = [c for (c, rr) in celdas if rr == r] + [c - 0.5 for (c, rr) in vert if rr in (r, r + 1)]
+            tramo[r] = (min(usados, default=0), max(usados, default=-1))
+        potencia = [True] * filas  # riel izquierdo
+        for c in range(cols):
+            r = 0
+            while r < filas:  # verticales en el borde izquierdo de la columna c: OR de las filas unidas
+                grupo = [r]
+                while (c, grupo[-1] + 1) in vert:
+                    grupo.append(grupo[-1] + 1)
+                v = any(potencia[g] for g in grupo)
+                for g in grupo:
+                    potencia[g] = v
+                r = grupo[-1] + 1
+            for r in range(filas):
+                s = celdas.get((c, r))
+                if s is None:
+                    potencia[r] = potencia[r] and tramo[r][0] <= c <= tramo[r][1]
+                elif isinstance(s, dict) and s.get("_") == "ce":
+                    potencia[r] = self.elemento(s, potencia[r], (i, c, r))
+                elif s != "-":
+                    self.avisos.add(f"R{i}: elemento '{s.get('_') if isinstance(s, dict) else s}' no simulado")
+                    potencia[r] = False
+
+    def ciclo(self):
+        for i, fg in self.rejillas:
+            self.rejilla(i, fg)
+        self.mem.update({"SM402": 0, "SM8002": 0})
+
+
+_SIMULADAS = {"MOV", "DMOV", "EMOV", "INC", "DEC", "ZRST", "BMOV", "FMOV"}
+
+
+@mcp.tool()
+def simular_ld(ruta_gx3: str, programa: str, pasos: list[dict], ms_por_ciclo: int = 10,
+               mostrar: list[str] | None = None) -> str:
+    """Simula un programa ladder SIN PLC (ciclo de scan en Python) para probar la logica antes de cargarla.
+
+    pasos: cada paso fija dispositivos y corre ciclos, ej.
+      [{"X0": 1}, {"X0": 0}, {"segundos": 3}, {"X1": 1, "ciclos": 2}]
+      claves: dispositivos (X0, D10...) o etiquetas con dispositivo; "ciclos" (por defecto 1) o "segundos".
+    mostrar: dispositivos a reportar tras cada paso (T0 muestra TS0 contacto y TN0 valor actual);
+      por defecto los que escribe el programa y los fijados en los pasos.
+    Simula contactos, flancos, comparaciones, bobinas, SET/RST, timers, MOV/DMOV/EMOV, INC/DEC, ZRST, BMOV, FMOV.
+    No simula ST, llamadas a FB ni otras instrucciones (lo avisa). Todo arranca en 0, como un PLC recien en RUN.
+    """
+    if not 1 <= ms_por_ciclo <= 1000:
+        raise ToolError("ms_por_ciclo entre 1 y 1000.")
+    info = nombres_etiquetas(ruta_gx3)
+    nombres = {k: v["nombre"] or k for k, v in info.items()}
+    with _abrir(ruta_gx3) as z, tempfile.TemporaryDirectory() as d:
+        if f"{programa}_LDDB.db" not in z.namelist():
+            raise ToolError(f"'{programa}' no es un programa ladder; ver listar_programas.")
+        c = sqlite3.connect(z.extract(f"{programa}_LDDB.db", d))
+        try:
+            bloques = [data for (data,) in c.execute("select data from LadderBlocks where blocktype in (0, 4) order by pos")]
+        finally:
+            c.close()
+    sim = _Simulador(bloques, nombres, _alias(ruta_gx3, info), ms_por_ciclo)
+
+    def normal(k: str) -> str:
+        return k.upper() if _DISP.fullmatch(k.upper()) else k
+
+    fijados, fotos, total = [], [], 0
+    for paso in pasos:
+        paso = dict(paso)
+        ciclos = paso.pop("ciclos", None)
+        segundos = paso.pop("segundos", None)
+        ciclos = int(ciclos if ciclos is not None else round(segundos * 1000 / ms_por_ciclo) if segundos else 1)
+        total += ciclos
+        if total > 200_000:
+            raise ToolError("Demasiados ciclos (max 200000); sube ms_por_ciclo para tiempos largos.")
+        for k, v in paso.items():
+            k = normal(k)
+            if re.fullmatch(r"[XY]\d*[89]\d*", k):
+                raise ToolError(f"{k}: X/Y son octales (sin 8 ni 9).")
+            sim.escribir(k, _es_palabra(sim.alias.get(k, k)), v)
+            fijados.append(sim.clave(k, _es_palabra(sim.alias.get(k, k))))
+        for _ in range(ciclos):
+            sim.ciclo()
+        texto = ", ".join(f"{k}={v}" for k, v in paso.items()) or "sin cambios"
+        fotos.append((f"{texto} | {ciclos} ciclo(s) = {ciclos * ms_por_ciclo / 1000:g} s", dict(sim.mem)))
+
+    if mostrar:
+        claves = []
+        for m in map(normal, mostrar):
+            claves += [sim.clave(m, False), sim.clave(m, True)] if re.fullmatch(r"[TC]\d+", sim.alias.get(m, m)) \
+                else [sim.clave(m, _es_palabra(sim.alias.get(m, m)))]
+    else:
+        claves = list(dict.fromkeys(fijados)) + sorted(sim.escritos - set(fijados), key=_orden_natural)
+    salida = [f"Simulacion de {programa}: {len(sim.rejillas)} renglones, {ms_por_ciclo} ms por ciclo (TS contacto, TN valor)"]
+    for n, (titulo, mem) in enumerate(fotos, 1):
+        salida.append(f"Paso {n}: {titulo}  ->  " + " ".join(f"{k}={mem.get(k, 0)}" for k in dict.fromkeys(claves)))
+    sin_uso = sorted(set(fijados) - sim.leidos, key=_orden_natural)
+    if sin_uso:
+        sim.avisos.add(f"fijados pero el programa nunca los lee: {', '.join(sin_uso)}")
+    if sim.avisos:
+        salida.append("Avisos: " + "; ".join(sorted(sim.avisos)))
     return "\n".join(salida)
 
 

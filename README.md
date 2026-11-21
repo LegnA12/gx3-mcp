@@ -41,6 +41,8 @@ El formato `.gx3` no está documentado. Se entendió analizando proyectos reales
 | `monitorear_ld` | Dibuja el ladder con el estado **en vivo** del PLC, como el monitor de GX Works3: `■` conduce o está activo, `□` no. Las comparaciones e instrucciones muestran sus valores. | "Monitorea el programa principal." |
 | `estado_plc` | Diagnóstico de la CPU: RUN/STOP, error y su hora, batería, caída de alimentación, tiempos de ciclo y reloj. | "¿Cómo está el PLC?" |
 | `diagnosticar_modbus_rtu` | Diagnóstico de los canales serie MODBUS RTU (`ADPRW`): modo, formato (bps/paridad), reintentos, timeouts y el último error traducido (por ejemplo `7309H` = el esclavo no responde, `730AH` con su excepción). | "¿Por qué no responde el sensor del CH1?" |
+| `simular_ld` | Ejecuta un programa ladder **sin PLC**, ciclo a ciclo, con los pasos que le indiques (`{"X0": 1}`, `{"segundos": 3}`...). Reporta los dispositivos después de cada paso y avisa lo que no puede simular (ST, FB, instrucciones no soportadas). | "Simula: pulso X0, espera 3 s, activa X1. ¿Qué hace Y0?" |
+| `escribir_plc` | **Escribe** dispositivos en el PLC por SLMP (`1401`) y los relee para confirmar. Solo dentro de los rangos de la variable de entorno `GX3_ESCRITURA_PERMITIDA`; sin ella no escribe nada. | "Pon D100 en 25." |
 
 Lo que `agregar_renglon_ld` sabe escribir:
 
@@ -58,7 +60,8 @@ Lo que `agregar_renglon_ld` sabe escribir:
 - **Sin llamadas a FB desde ladder** al escribir (sí se leen).
 - **Borrar renglones todavía no está validado en GX Works3** (agregar sí lo está). Revisa el resultado antes de usarlo.
 - Los nombres de programa salen de `ConvertData` solo si el proyecto **ya fue convertido**. Si no, algunos programas aparecen solo con su hash.
-- **El acceso al PLC es solo de lectura**: no escribe dispositivos, no fuerza entradas y no descarga programas (eso se hace desde GX Works3).
+- **El simulador** cubre contactos, flancos, comparaciones, bobinas, `SET`/`RST`, timers, `MOV`/`DMOV`/`EMOV`, `INC`/`DEC`, `ZRST`, `BMOV` y `FMOV`. No ejecuta ST ni FB, y el formato de los contadores es supuesto (sin ejemplo real todavía).
+- **La escritura al PLC** es solo de dispositivos dentro de la lista permitida y solo por SLMP: no fuerza entradas ni descarga programas (eso se hace desde GX Works3).
 - **Modbus/TCP solo está probado contra un esclavo simulado**; SLMP sí está probado con un FX5U real. Modbus asume la asignación inicial "FX5 dedicado".
 
 ## Requisitos e instalación
@@ -80,6 +83,18 @@ claude mcp add --scope user gx3 -- <ruta>\.venv\Scripts\python.exe <ruta>\gx3mcp
 ```
 
 Reinicia Claude Code y comprueba con `/mcp` que `gx3` aparece conectado.
+
+**Escritura al PLC (opcional).** `escribir_plc` está deshabilitada hasta que defines qué dispositivos puede tocar:
+
+```
+claude mcp add --scope user gx3 -e GX3_ESCRITURA_PERMITIDA="D101-D105,M100-M109" -- <ruta>\.venv\Scripts\python.exe <ruta>\gx3mcp\gx3_mcp.py
+```
+
+**Skill para Claude Code.** `skills/plc-fx5-gx3` le enseña a Claude cuándo usar cada herramienta, el flujo seguro de edición y cómo conectar un software Python (por ejemplo de visión) al PLC. Incluye mapa de registros, ladder y cliente con reconexión, todo probado. Instálala enlazando la carpeta:
+
+```
+New-Item -ItemType Junction -Path "$env:USERPROFILE\.claude\skills\plc-fx5-gx3" -Target "<ruta>\skills\plc-fx5-gx3"
+```
 
 ## Ejemplos de uso
 
@@ -362,10 +377,13 @@ X e Y son octales y se guardan leyendo sus dígitos como hexadecimal (por ejempl
 ├── gx3mcp/                 Todo el código Python
 │   ├── gx3_mcp.py              Servidor MCP y herramientas
 │   ├── etiquetas.py            Resuelve _lid/<LabelID>/<RowID> a nombres de etiqueta
-│   ├── plc_slmp.py             Cliente SLMP 3E binario (solo lectura), con autoprueba
+│   ├── plc_slmp.py             Cliente SLMP 3E binario (lectura y escritura, ClienteSLMP persistente), con autoprueba
 │   ├── plc_modbus.py           Cliente Modbus/TCP (solo lectura), con autoprueba
 │   ├── test_gx3_mcp.py         Pruebas de lectura/edición ST y utilidades
 │   └── test_ladder.py          Pruebas de codificación y lectura de ladder
+├── skills/plc-fx5-gx3/     Skill para Claude Code
+│   ├── SKILL.md                Qué herramienta usar y flujo seguro de edición
+│   └── vision-plc.md           Conectar software Python de visión al PLC (SLMP)
 └── conocimiento/
     └── formato_gx3.md          Formato .gx3 obtenido por ingeniería inversa
 ```
@@ -400,7 +418,9 @@ Para el juego de instrucciones y la comunicación del FX5, consulta los manuales
 - [x] Lectura en vivo del PLC por SLMP (probada con un FX5U real).
 - [x] Lectura por Modbus/TCP (probada contra un esclavo simulado).
 - [ ] Probar Modbus/TCP con un PLC real.
-- [ ] Escritura controlada de dispositivos (con confirmación explícita y lista de dispositivos permitidos).
+- [x] Escritura controlada de dispositivos por SLMP (lista de dispositivos permitidos y relectura).
+- [x] Simulador del ladder en Python (sin PLC).
+- [x] Skill para Claude Code (`skills/plc-fx5-gx3`), con guía para conectar software de visión al PLC.
 
 ## Contribuir
 

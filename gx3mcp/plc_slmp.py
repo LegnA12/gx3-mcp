@@ -1,4 +1,4 @@
-"""Lectura de dispositivos de un PLC FX5 por SLMP (trama 3E binaria, TCP). Solo lectura.
+"""Cliente SLMP (trama 3E binaria, TCP) para PLC FX5: lectura (0401) y escritura (1401). Solo biblioteca estandar.
 
 Requiere en GX Works3: Ethernet Port > External Device Configuration > "SLMP Connection Module",
 TCP, puerto propio (ej. 5000; no usar 5549-5569) y Communication Data Code = Binary.
@@ -31,12 +31,98 @@ def _parsear(texto: str) -> tuple[str, int, int]:
     return tipo, numero, n
 
 
-def trama_lectura(tipo: str, numero: int, puntos: int) -> bytes:
-    """Peticion 3E binaria de lectura por lotes (0401): bits subcomando 0001, palabras 0000."""
-    sub = 0x0001 if tipo in _BITS else 0x0000
-    datos = struct.pack("<HHH", 0x0000, 0x0401, sub) + numero.to_bytes(3, "little") + bytes([_CODIGO[tipo]]) \
-        + struct.pack("<H", puntos)  # 0x0000 = temporizador de monitoreo (el socket tiene su propio timeout)
+def _trama(comando: int, tipo: str, numero: int, puntos: int, extra: bytes = b"") -> bytes:
+    sub = 0x0001 if tipo in _BITS else 0x0000  # bits subcomando 0001, palabras 0000
+    datos = struct.pack("<HHH", 0x0000, comando, sub) + numero.to_bytes(3, "little") + bytes([_CODIGO[tipo]]) \
+        + struct.pack("<H", puntos) + extra  # 0x0000 = temporizador de monitoreo (el socket tiene su propio timeout)
     return bytes([0x50, 0x00, 0x00, 0xFF, 0xFF, 0x03, 0x00]) + struct.pack("<H", len(datos)) + datos
+
+
+def trama_lectura(tipo: str, numero: int, puntos: int) -> bytes:
+    """Peticion 3E binaria de lectura por lotes (0401)."""
+    return _trama(0x0401, tipo, numero, puntos)
+
+
+def trama_escritura(tipo: str, numero: int, valores: list[int]) -> bytes:
+    """Escritura por lotes (1401, p630-632): bits 2 por byte (nibble alto primero), palabras 16 bits little-endian."""
+    if tipo in _BITS:
+        v = list(valores) + [0] * (len(valores) % 2)
+        datos = bytes((v[i] << 4) | v[i + 1] for i in range(0, len(v), 2))
+    else:
+        datos = struct.pack(f"<{len(valores)}H", *(x & 0xFFFF for x in valores))
+    return _trama(0x1401, tipo, numero, len(valores), datos)
+
+
+def rangos_permitidos(texto: str) -> list[tuple[str, int, int]]:
+    """'M100-M199, D100-D110, Y20' -> [('M', 100, 199), ('D', 100, 110), ('Y', 16, 16)]."""
+    rangos = []
+    for parte in filter(None, (p.strip() for p in texto.split(","))):
+        ini, _, fin = parte.partition("-")
+        (t1, n1, _), (t2, n2, _) = _parsear(ini), _parsear(fin or ini)
+        if t1 != t2 or n2 < n1:
+            raise ValueError(f"Rango permitido invalido '{parte}' (ej. M100-M199)")
+        rangos.append((t1, n1, n2))
+    return rangos
+
+
+class ClienteSLMP:
+    """Conexion SLMP persistente, para programas que leen/escriben seguido (ej. un software de vision).
+
+        with ClienteSLMP("192.168.3.250", 5000) as plc:
+            disparo, = plc.leer(["M100"])[0]
+            plc.escribir("D100", [1, 250, -40])
+
+    Si el PLC corta la conexion se lanza ConnectionError/OSError: cerrar y crear otro cliente.
+    escribir() no filtra rangos; la politica de que se puede escribir es de la aplicacion.
+    """
+
+    def __init__(self, ip: str, puerto: int, timeout: float = 3.0):
+        self.s = socket.create_connection((ip, puerto), timeout=timeout)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+    def close(self):
+        self.s.close()
+
+    def _pedir(self, trama: bytes, tipo: str, puntos: int) -> list[int]:
+        self.s.sendall(trama)  # semi-duplex: una peticion, su respuesta, la siguiente (p572)
+        cab = _recibir(self.s, 9)
+        return decodificar(tipo, puntos, cab + _recibir(self.s, struct.unpack_from("<H", cab, 7)[0]))
+
+    def leer(self, dispositivos: list[str]) -> list[list[int]]:
+        """['D10', 'M0:8'] -> [[v], [8 bits]]."""
+        return [self._pedir(trama_lectura(t, n, p), t, p) for t, n, p in map(_parsear, dispositivos)]
+
+    def escribir(self, dispositivo: str, valores: list[int]) -> None:
+        """Valores seguidos desde 'dispositivo' (bits 0/1, palabras -32768..65535)."""
+        tipo, numero, _ = _validar_escritura(dispositivo, valores)
+        self._pedir(trama_escritura(tipo, numero, valores), tipo, 0)
+
+
+def _validar_escritura(dispositivo: str, valores: list[int]) -> tuple[str, int, int]:
+    tipo, numero, _ = _parsear(dispositivo)
+    if not 1 <= len(valores) <= 960:
+        raise ValueError("Entre 1 y 960 valores por escritura")
+    if tipo in _BITS and any(v not in (0, 1) for v in valores):
+        raise ValueError(f"{dispositivo} es de bit: solo 0 o 1")
+    if any(not -32768 <= v <= 65535 for v in valores):
+        raise ValueError("Valores de palabra entre -32768 y 65535")
+    return tipo, numero, len(valores)
+
+
+def escribir(ip: str, puerto: int, dispositivo: str, valores: list[int], permitidos: str,
+             timeout: float = 3.0) -> list[int]:
+    """Escribe valores seguidos desde 'dispositivo' SOLO si todo el tramo cae en 'permitidos'; devuelve la relectura."""
+    tipo, numero, n = _validar_escritura(dispositivo, valores)
+    if not any(t == tipo and a <= numero and numero + n - 1 <= b for t, a, b in rangos_permitidos(permitidos)):
+        raise PermissionError(f"{dispositivo} ({n} puntos) esta fuera de los permitidos: {permitidos}")
+    with ClienteSLMP(ip, puerto, timeout) as plc:
+        plc.escribir(dispositivo, valores)
+        return plc.leer([f"{dispositivo}:{n}"])[0]
 
 
 def decodificar(tipo: str, puntos: int, respuesta: bytes) -> list[int]:
@@ -54,14 +140,8 @@ def decodificar(tipo: str, puntos: int, respuesta: bytes) -> list[int]:
 def leer(ip: str, puerto: int, dispositivos: list[str], timeout: float = 3.0) -> list[list[int]]:
     """Lee varios dispositivos por UNA conexion TCP (el modulo SLMP del PLC atiende un cliente por conexion)."""
     pedidos = [_parsear(d) for d in dispositivos]  # valida todo antes de conectar
-    resultados = []
-    with socket.create_connection((ip, puerto), timeout=timeout) as s:
-        for tipo, numero, puntos in pedidos:  # semi-duplex: una peticion, su respuesta, la siguiente (p572)
-            s.sendall(trama_lectura(tipo, numero, puntos))
-            cab = _recibir(s, 9)
-            resto = _recibir(s, struct.unpack_from("<H", cab, 7)[0])
-            resultados.append(decodificar(tipo, puntos, cab + resto))
-    return resultados
+    with ClienteSLMP(ip, puerto, timeout) as plc:
+        return [plc._pedir(trama_lectura(t, n, p), t, p) for t, n, p in pedidos]
 
 
 def _recibir(s: socket.socket, n: int) -> bytes:
@@ -107,4 +187,30 @@ if __name__ == "__main__":
     threading.Thread(target=plc_falso, daemon=True).start()
     assert leer("127.0.0.1", srv.getsockname()[1], ["D10:2", "Y0:2"]) == [[5, 10], [1, 0]]
     assert len(conexiones) == 1
+
+    # Escritura: ejemplos binarios del manual (p631-632)
+    assert trama_escritura("M", 100, [1, 1, 0, 0, 1, 1, 0, 0])[11:] == bytes.fromhex("01 14 01 00 64 00 00 90 08 00 11 00 11 00")
+    assert trama_escritura("D", 100, [0x1995, 0x1202, 0x1130])[11:] == \
+        bytes.fromhex("01 14 00 00 64 00 00 a8 03 00 95 19 02 12 30 11")
+    assert trama_escritura("M", 0, [1, 0, 1])[-2:] == bytes.fromhex("10 10")  # impar: ultimo nibble en 0
+    assert rangos_permitidos("M100-M199, Y10-Y17,D5") == [("M", 100, 199), ("Y", 8, 15), ("D", 5, 5)]
+    for disp, vals, error in [("M200", [1], PermissionError), ("M199", [1, 1], PermissionError),
+                              ("X0", [1], PermissionError), ("M100", [2], ValueError), ("D5", [70000], ValueError)]:
+        try:
+            escribir("127.0.0.1", 1, disp, vals, "M100-M199, D5")
+            raise AssertionError(disp)
+        except error:
+            pass
+    srv2 = socket.socket(); srv2.bind(("127.0.0.1", 0)); srv2.listen(1)
+    recibido = []
+    def plc_falso_escritura():
+        c, _ = srv2.accept()
+        recibido.append(c.recv(64))
+        c.sendall(bytes.fromhex("d0 00 00 ff ff 03 00 02 00 00 00"))  # escritura OK
+        c.recv(64)
+        c.sendall(bytes.fromhex("d0 00 00 ff ff 03 00 04 00 00 00 07 00"))  # relectura D5 = 7
+        c.close()
+    threading.Thread(target=plc_falso_escritura, daemon=True).start()
+    assert escribir("127.0.0.1", srv2.getsockname()[1], "D5", [7], "D5") == [7]
+    assert recibido[0][11:13] == b"\x01\x14"
     print("autoprueba SLMP OK")
