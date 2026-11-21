@@ -2,7 +2,7 @@
 
 Servidor **MCP** (Model Context Protocol) en Python que permite a Claude (Claude Code o cualquier cliente MCP) **leer y editar directamente proyectos Mitsubishi GX Works3** (archivos `.gx3`, PLC MELSEC iQ-F / FX5U): listar programas, leer y editar código ST, leer ladder como texto, consultar etiquetas y agregar o borrar renglones ladder. También **lee en vivo el PLC** por Ethernet (SLMP o Modbus/TCP), en modo solo lectura.
 
-El formato `.gx3` no está documentado. Se entendió analizando proyectos reales (ingeniería inversa) y se validó abriendo los resultados en GX Works3, donde convirtieron y compilaron correctamente.
+Se desarrolló en un entorno controlado, con proyectos de prueba propios y un PLC de laboratorio, observando cómo GX Works3 guarda cada elemento. Todo lo que el servidor escribe se validó abriendo los resultados en GX Works3, donde convierten y compilan correctamente.
 
 > [!WARNING]
 > **Proyecto no oficial, sin relación con Mitsubishi Electric.**
@@ -268,11 +268,11 @@ flowchart TD
 
 El renglón agregado queda **sin convertir** (`translated=0`). Al convertir, GX Works3 solo cambia ese campo a `1` y genera el IL correspondiente.
 
-### Cómo se aprendió el formato (ingeniería inversa)
+### Cómo se validó cada elemento
 
 ```mermaid
 flowchart TD
-    A["Proyectos reales .gx3"] --> B["Extraer y comparar las bases SQLite"]
+    A["Proyectos de prueba propios .gx3"] --> B["Extraer y comparar las bases SQLite"]
     B --> C["Hipotesis sobre el formato"]
     C --> D["Generar un renglon con el servidor"]
     D --> E["Comparar byte a byte con renglones reales"]
@@ -408,7 +408,7 @@ X e Y son octales y se guardan leyendo sus dígitos como hexadecimal (por ejempl
 │   ├── SKILL.md                Qué herramienta usar y flujo seguro de edición
 │   └── vision-plc.md           Conectar software Python de visión al PLC (SLMP)
 └── conocimiento/
-    └── formato_gx3.md          Formato .gx3 obtenido por ingeniería inversa
+    └── formato_gx3.md          Notas técnicas del formato .gx3
 ```
 
 > Las pruebas necesitan **tus propios proyectos `.gx3`**, que no se incluyen en el repositorio:

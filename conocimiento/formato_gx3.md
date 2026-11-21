@@ -1,6 +1,6 @@
 # Formato .gx3 (GX Works3): etiquetas, FB y elementos ladder
 
-Este documento salió de ingeniería inversa de solo lectura sobre proyectos FX5U reales (no incluidos). Todo se extrajo a directorios temporales; ningún `.gx3` se modificó.
+Estas notas se obtuvieron en un entorno controlado, en modo solo lectura, sobre proyectos FX5U de prueba propios (no incluidos). Todo se extrajo a directorios temporales; ningún `.gx3` se modificó.
 
 - **[V] VERIFICADO**: lo respaldan varios ejemplos o todos los proyectos.
 - **[H] HIPÓTESIS**: es coherente con los datos, pero no está probado.
@@ -19,7 +19,7 @@ proyectos y comprueba que cada `_lid` del ladder y del MIL resuelve a una fila d
 | `<hash16>_LDDB.db` / `_STDB.db` / `_MilDB.db` | Cuerpo LD, cuerpo ST y MIL de un POU. MIL existe tanto para POU LD como ST. [V] |
 | `<dec>_StepInfo.db` | Una por POU; `<dec>` es el **ID decimal del POU**. `T_Block(BlockID '{GUID}', BodyID, StepSize)` y `T_Step(ElementIDMacroFB, MilID, StepSize)`. `BodyID` es el `hash16` del cuerpo como int64 con signo, o 0. `BlockID` es el GUID del bloque (`_guid/<guid en minúsculas>` en LDDB/MilDB). [V] |
 | `ConvertData/<dec>/` | Datos compilados por "Convertir". Por POU: `PouPCode.pcode`, y `TempAggrigaton.bin` solo en POU ST [V]. Por archivo de programa: `Program.qpg`, `PouLinkOrder.info` (IDs decimales de POU, uno por línea), `ProgramFilePCode.pcode` y otros. `Progress.txt` guarda el log de la última conversión, en texto. |
-| `_Project.txc` | Cifrado (árbol del proyecto). No lo desciframos. |
+| `_Project.txc` | Cifrado (árbol del proyecto). Fuera del alcance de este proyecto. |
 | `*.w3pa`, `*.PRM`, `!ProjectExInfo.dat` | Parámetros binarios (CPU, módulos, ethernet). No se analizaron. |
 | `<hash>_DM.db` | `MEMORY_DATA(DevCode, DevNo, MemSize, MemData BLOB)`: memoria de dispositivos o valores iniciales [H]. |
 
@@ -305,7 +305,7 @@ Segs => Linea1.Zona.Espera.Segundos, …)`. Los pines de palabra son `vag` con `
 ## 5. Límites y pendientes
 - Los nombres de programa dependen de `ConvertData`. Si el proyecto no se convirtió después de editar, en algunos POU ST
   no se pudo enlazar el `StepInfo` (9 de 17 POU en `<proyecto>`). Para esos, `etiquetas.py`
-  devuelve `PROGRAMA ? [hash]` o solo el hash. La fuente definitiva sería descifrar `_Project.txc`.
+  devuelve `PROGRAMA ? [hash]` o solo el hash. La fuente definitiva sería `_Project.txc`, que está cifrado y queda fuera del alcance.
 - No vimos FUN de usuario, FB macro, `VAR_IN_OUT`, STRING, LREAL, ni comentarios en etiquetas de usuario.
 - `etiquetas.py` no resuelve el dispositivo de un **miembro** (`Global.Miembro`). Para eso hay que consultar
   `DeviceAssignTbl` con raíz y miembro (§1.9).
