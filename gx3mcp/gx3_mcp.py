@@ -128,7 +128,14 @@ def _guardar_cambio(ruta_gx3: str, programa: str, sufijo: str, cambiar, ruta_sal
     if os.path.exists(ruta_salida):
         respaldo = f"{ruta_salida[:-4]}.{time.strftime('%Y%m%d-%H%M%S')}.bak"
         shutil.copy2(ruta_salida, respaldo)
-    os.replace(tmp, ruta_salida)
+    try:
+        os.replace(tmp, ruta_salida)
+    except PermissionError:  # GX Works3 bloquea el .gx3 mientras el proyecto esta abierto
+        os.remove(tmp)
+        if respaldo:
+            os.remove(respaldo)
+        raise ToolError(f"{ruta_salida} esta bloqueado (abierto en GX Works3?). Cierra el proyecto y repite; "
+                        "no se cambio nada.")
     msg = f"Guardado en {ruta_salida}."
     if respaldo:
         msg += f" Respaldo del archivo anterior: {respaldo}."

@@ -38,6 +38,8 @@ El servidor MCP `gx3` lee y edita proyectos `.gx3` y habla con el PLC en vivo. E
 - `T0` como contacto = TS0 (terminó); como valor = TN0. Timers T cuentan en 100 ms: `OUT T0 K30` = 3 s.
 - Renglones nuevos: solo **dispositivos directos** y **una salida** por renglón. Escritura de etiquetas, contadores, `D>=`, `DMOV`, `OUTH` aún no soportados: dilo, no inventes el formato.
 - `escribir_plc` solo funciona dentro de `GX3_ESCRITURA_PERMITIDA` (variable de entorno del servidor). Nunca escribas en una bobina que el programa maneja: el siguiente scan la sobrescribe.
+- Si un guardado responde "esta bloqueado", el proyecto sigue abierto en GX Works3: pide cerrarlo (no se cambio nada).
+- Modbus: con el FX5 de **esclavo** (la PC pregunta) basta configurar el *MODBUS/TCP Connection Module*, sin instrucciones en el programa. Con el FX5 de **maestro** sí se programa: `ADPRW` en RTU, protocolo predefinido en TCP.
 - Contactos: `X0` NA, `/X0` NC, `↑X0`/`↓X0` flancos, `>= D10 K5`, `E< D10 E1.5`. Salidas: `Y0`, `SET M0`, `RST M0`, `OUT T0 K30`, `MOV K0 D10`, `INCP D10`, `EMOV`, `ZRST`, `BMOV`.
 
 ## Conectar software Python (visión, HMI)
